@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta name="theme-color" content="#6c5ce7">
+  <meta name="description" content="Личный финансовый помощник: доходы, расходы, цели и долги в одном месте.">
+  <title>Копилка — личные финансы</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <section class="app-lock" id="appLock">
+    <div class="lock-card">
+      <span class="lock-mark"><svg viewBox="0 0 32 32"><path d="M10 14V9a6 6 0 0 1 12 0v5m-14 0h16v14H8zM16 19v4"/></svg></span>
+      <span class="kicker purple">ЗАЩИЩЁННЫЙ ВХОД</span>
+      <h1>Копилка закрыта</h1>
+      <p id="lockGreeting">Введите пароль или PIN-код, чтобы открыть финансовые данные.</p>
+      <form id="unlockForm">
+        <label>Пароль или PIN<input id="unlockCode" type="password" inputmode="text" autocomplete="current-password" placeholder="Введите код" required></label>
+        <button class="button primary wide" type="submit">Открыть кабинет</button>
+      </form>
+      <button class="button biometric-unlock wide" id="biometricUnlockButton" hidden>◉ Войти по биометрии</button>
+      <div class="lock-profile-switch" id="lockProfileSwitch" hidden>
+        <small>ВОЙТИ В ДРУГОЙ АККАУНТ</small>
+        <div id="lockProfileList"></div>
+      </div>
+      <small class="lock-error" id="lockError" role="alert"></small>
+      <small class="lock-note">Данные остаются на этом устройстве и скрыты до разблокировки.</small>
+    </div>
+  </section>
+
+  <section class="onboarding" id="onboarding" hidden>
+    <div class="onboarding-visual">
+      <div class="onboarding-brand">
+        <span class="brand-mark"><svg viewBox="0 0 32 32"><path d="M8 7.5A6.5 6.5 0 0 1 14.5 1h3A6.5 6.5 0 0 1 24 7.5V9h1a4 4 0 0 1 4 4v10a7 7 0 0 1-7 7H10a7 7 0 0 1-7-7V13a4 4 0 0 1 4-4h1V7.5Zm4 1.5h8V7.5A2.5 2.5 0 0 0 17.5 5h-3A2.5 2.5 0 0 0 12 7.5V9Zm8 7a2 2 0 1 0 0 4h5v-4h-5Z"/></svg></span>
+        <span><b>Копилка</b><small>ваш личный финансовый кабинет</small></span>
+      </div>
+      <div class="onboarding-copy">
+        <span class="onboarding-kicker">ДЕНЬГИ БЕЗ ТРЕВОГИ</span>
+        <h1>Возьмите финансы<br>под свой контроль</h1>
+        <p>Доходы, расходы, кредиты и платёжный календарь — в одном приватном пространстве.</p>
+        <div class="onboarding-benefits">
+          <span><i>✓</i>Данные остаются на устройстве</span>
+          <span><i>✓</i>Работает без интернета</span>
+          <span><i>✓</i>Никаких банковских паролей</span>
+        </div>
+      </div>
+      <div class="onboarding-orbit"><span>₽</span><i></i><b></b></div>
+    </div>
+    <div class="onboarding-panel">
+      <form class="onboarding-form" id="onboardingForm">
+        <button class="onboarding-close" id="onboardingClose" type="button" hidden>← Вернуться в кабинет</button>
+        <span class="kicker purple">ДОБРО ПОЖАЛОВАТЬ</span>
+        <h2 id="onboardingTitle">Создайте личный кабинет</h2>
+        <p id="onboardingIntro">Придумайте логин и пароль. Других данных для регистрации не требуется.</p>
+        <label>Логин<input id="onboardingLogin" autocomplete="username" placeholder="Ваш логин" required></label>
+        <label>Пароль<input id="onboardingPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
+        <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit">Создать кабинет <span>→</span></button>
+        <div class="onboarding-privacy"><i>●</i><span><b>Приватная регистрация</b><small>Логин и защищённый отпечаток пароля хранятся только на этом устройстве.</small></span></div>
+      </form>
+    </div>
+  </section>
+
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#dashboard" aria-label="Копилка — на главную">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32"><path d="M8 7.5A6.5 6.5 0 0 1 14.5 1h3A6.5 6.5 0 0 1 24 7.5V9h1a4 4 0 0 1 4 4v10a7 7 0 0 1-7 7H10a7 7 0 0 1-7-7V13a4 4 0 0 1 4-4h1V7.5Zm4 1.5h8V7.5A2.5 2.5 0 0 0 17.5 5h-3A2.5 2.5 0 0 0 12 7.5V9Zm8 7a2 2 0 1 0 0 4h5v-4h-5Z"/></svg>
+        </span>
+        <span><strong>Копилка</strong><small>деньги без тревоги</small></span>
+      </a>
+
+      <nav class="main-nav" aria-label="Основная навигация">
+        <button class="nav-link active" data-page="dashboard"><span>⌂</span>Обзор</button>
+        <button class="nav-link" data-page="operations"><span>↕</span>Операции</button>
+        <button class="nav-link" data-page="recurring"><span>↻</span>Регулярные</button>
+        <button class="nav-link" data-page="accounts"><span>▣</span>Счета</button>
+        <button class="nav-link" data-page="debts"><span>◎</span>Долги</button>
+        <button class="nav-link" data-page="calendar"><span>▦</span>Календарь</button>
+        <button class="nav-link" data-page="analytics"><span>⌁</span>Аналитика</button>
+        <button class="nav-link" data-page="settings"><span>⚙</span>Настройки</button>
+      </nav>
+
+      <div class="side-goal">
+        <div class="side-goal-head"><span>Финансовая подушка</span><b id="sideGoalPercent">0%</b></div>
+        <div class="progress"><i id="sideGoalBar"></i></div>
+        <small id="sideGoalText">Добавьте цель в настройках</small>
+      </div>
+
+      <div class="sidebar-foot">
+        <span class="privacy-dot"></span>
+        <span><b>Приватно</b><small>данные только на устройстве</small></span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobileMenu" aria-label="Открыть меню">☰</button>
+        <div class="page-heading">
+          <p id="eyebrow">Ваш финансовый центр</p>
+          <h1 id="pageTitle">Добрый день!</h1>
+        </div>
+        <div class="header-actions">
+          <div class="desktop-add-wrap">
+            <button class="button primary desktop-add-trigger" id="desktopQuickAdd" type="button" aria-expanded="false">
+              <span>＋</span> Добавить
+            </button>
+            <div class="desktop-add-menu" id="desktopAddMenu" hidden>
+              <button type="button" data-open-modal="income"><span class="desktop-add-icon income">＋</span><b>Доход</b><small>Зарплата или поступление</small></button>
+              <button type="button" data-open-modal="expense"><span class="desktop-add-icon expense">−</span><b>Расход</b><small>Покупка или платёж</small></button>
+              <button type="button" data-open-modal="transfer"><span class="desktop-add-icon transfer">⇄</span><b>Перевод</b><small>Между своими счетами</small></button>
+              <button type="button" data-open-modal="recurring"><span class="desktop-add-icon recurring">↻</span><b>Регулярная операция</b><small>Подписка, зарплата, ЖКХ</small></button>
+            </div>
+          </div>
+          <div class="profile-menu-wrap">
+            <button class="profile-trigger" id="profileMenuButton" type="button" aria-label="Открыть меню профиля" aria-expanded="false">
+              <span class="profile-avatar profile-avatar-small" id="profileTriggerAvatar">П</span>
+              <span class="profile-trigger-copy"><b id="profileTriggerName">Пользователь</b><small>Личный кабинет</small></span>
+              <span class="profile-chevron">⌄</span>
+            </button>
+            <div class="profile-menu" id="profileMenu" hidden>
+              <div class="profile-menu-head">
+                <button class="profile-photo-button" id="profileAvatarButton" type="button" aria-label="Изменить фотографию">
+                  <span class="profile-avatar profile-avatar-large" id="profileMenuAvatar">П</span>
+                  <span class="profile-photo-mark">⌁</span>
+                </button>
+                <div><b id="profileMenuName">Пользователь</b><small id="profileMenuLogin">@user</small></div>
+              </div>
+              <input id="profileAvatarInput" type="file" accept="image/*" hidden>
+              <div class="profile-accounts">
+                <small class="profile-section-label">АККАУНТЫ НА УСТРОЙСТВЕ</small>
+                <div class="profile-list" id="profileList"></div>
+                <button class="profile-action profile-add-account" id="addProfileButton" type="button"><span>＋</span><b>Добавить аккаунт</b></button>
+              </div>
+              <div class="profile-menu-separator"></div>
+              <button class="profile-action" id="profileRemindersButton" type="button"><span>♢</span><b>Напоминания</b><em id="profileReminderBadge" hidden>0</em></button>
+              <button class="profile-action" id="profileSettingsButton" type="button"><span>⚙</span><b>Настройки</b></button>
+              <button class="profile-action" id="profileThemeButton" type="button"><span id="profileThemeIcon">☾</span><b id="profileThemeLabel">Тёмная тема</b></button>
+              <button class="profile-action profile-logout" id="profileLogoutButton" type="button"><span>↪</span><b>Выйти из аккаунта</b></button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section class="page active" id="dashboard">
+        <div class="hero-grid">
+          <article class="balance-card">
+            <div class="balance-top">
+              <span class="soft-label">Общий баланс</span>
+              <button class="eye-button" id="privacyToggle" aria-label="Скрыть суммы">◉</button>
+            </div>
+            <div class="balance-value sensitive" id="balanceValue">0 ₽</div>
+            <div class="balance-trend" id="balanceTrend"><span>↑ 0%</span> к прошлому месяцу</div>
+            <svg class="balance-wave" viewBox="0 0 720 150" preserveAspectRatio="none" aria-hidden="true">
+              <defs>
+                <linearGradient id="waveFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0" stop-color="#fff" stop-opacity=".28"/>
+                  <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+                </linearGradient>
+              </defs>
+              <path d="M0 115 C80 110 85 78 155 83 S265 122 340 77 S440 26 510 56 S615 116 720 35 L720 150 L0 150Z" fill="url(#waveFill)"/>
+              <path d="M0 115 C80 110 85 78 155 83 S265 122 340 77 S440 26 510 56 S615 116 720 35" fill="none" stroke="#fff" stroke-opacity=".75" stroke-width="3"/>
+            </svg>
+            <div class="balance-footer">
+              <div><small>Доходы в этом месяце</small><b class="sensitive" id="heroIncome">0 ₽</b></div>
+              <div><small>Расходы в этом месяце</small><b class="sensitive" id="heroExpense">0 ₽</b></div>
+            </div>
+          </article>
+
+          <article class="card health-card">
+            <div class="card-title-row">
+              <div><span class="kicker purple">ФИНАНСОВОЕ ЗДОРОВЬЕ</span><h2>Ваш денежный пульс</h2></div>
+              <div class="score-ring" id="scoreRing"><strong id="healthScore">0</strong><small>/100</small></div>
+            </div>
+            <div class="health-metric">
+              <div class="metric-icon mint">↗</div>
+              <div><b>Норма сбережений</b><small id="savingHint">Нет данных за месяц</small></div>
+              <strong id="savingRate">0%</strong>
+            </div>
+            <div class="health-metric">
+              <div class="metric-icon peach">◷</div>
+              <div><b>Запас прочности</b><small>Свободные деньги после платежей</small></div>
+              <strong class="sensitive" id="freeMoney">0 ₽</strong>
+            </div>
+            <div class="coach-note" id="coachNote">Добавьте первые операции — и здесь появится персональная подсказка.</div>
+          </article>
+        </div>
+
+        <div class="stats-grid">
+          <article class="mini-stat">
+            <span class="stat-icon lilac">↗</span>
+            <div><small>Доходы</small><b class="sensitive" id="statIncome">0 ₽</b><em id="incomeCount">0 операций</em></div>
+          </article>
+          <article class="mini-stat">
+            <span class="stat-icon coral">↘</span>
+            <div><small>Расходы</small><b class="sensitive" id="statExpense">0 ₽</b><em id="expenseCount">0 операций</em></div>
+          </article>
+          <article class="mini-stat">
+            <span class="stat-icon sunshine">◎</span>
+            <div><small>Долги</small><b class="sensitive" id="statDebt">0 ₽</b><em id="debtCountMini">нет активных</em></div>
+          </article>
+          <article class="mini-stat">
+            <span class="stat-icon sky">◇</span>
+            <div><small>Резерв</small><b class="sensitive" id="statReserve">0 ₽</b><em>ваша цель</em></div>
+          </article>
+        </div>
+
+        <div class="content-grid">
+          <article class="card transactions-card">
+            <div class="card-title-row">
+              <div><span class="kicker">СВЕЖИЕ ДВИЖЕНИЯ</span><h2>Последние операции</h2></div>
+              <button class="text-button" data-go="operations">Все операции →</button>
+            </div>
+            <div class="transaction-list" id="recentTransactions"></div>
+          </article>
+
+          <article class="card plan-card">
+            <div class="card-title-row">
+              <div><span class="kicker orange">БЛИЖАЙШИЕ 30 ДНЕЙ</span><h2>Платёжный план</h2></div>
+              <span class="calendar-badge" id="todayBadge"></span>
+            </div>
+            <div id="upcomingPayments" class="payment-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="page" id="operations">
+        <div class="section-toolbar">
+          <div class="segmented" id="operationFilter">
+            <button class="active" data-filter="all">Все</button>
+            <button data-filter="income">Доходы</button>
+            <button data-filter="expense">Расходы</button>
+          </div>
+          <label class="search"><span>⌕</span><input id="operationSearch" type="search" placeholder="Поиск по операциям"></label>
+        </div>
+        <article class="card table-card">
+          <div class="card-title-row">
+            <div><span class="kicker">ИСТОРИЯ</span><h2>Доходы и расходы</h2></div>
+            <span class="count-label" id="operationCount">0 операций</span>
+          </div>
+          <div class="responsive-table">
+            <table>
+              <thead><tr><th>Операция</th><th>Категория</th><th>Дата</th><th>Счёт</th><th>Сумма</th><th></th></tr></thead>
+              <tbody id="operationRows"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <section class="page" id="recurring">
+        <div class="recurring-hero">
+          <div>
+            <span class="kicker">ФИНАНСЫ НА АВТОПИЛОТЕ</span>
+            <h2>Регулярные операции</h2>
+            <p>Зарплаты, подписки и коммунальные платежи создаются по расписанию.</p>
+          </div>
+          <div class="recurring-hero-stats">
+            <span>Ближайшая дата<b id="recurringNext">—</b></span>
+            <span>Расходы в месяц<b class="sensitive" id="recurringMonthly">0 ₽</b></span>
+          </div>
+          <div class="recurring-hero-actions">
+            <button class="button recurring-notification-button" id="notificationButton">♢ Включить уведомления</button>
+            <button class="button primary" data-open-modal="recurring">＋ Добавить</button>
+          </div>
+        </div>
+
+        <article class="card reminder-card">
+          <div class="card-title-row">
+            <div><span class="kicker orange">ТРЕБУЮТ ВНИМАНИЯ</span><h2>Напоминания</h2></div>
+            <span class="count-label" id="reminderCount">0 напоминаний</span>
+          </div>
+          <div class="reminder-list" id="reminderList"></div>
+        </article>
+
+        <div class="recurring-section-head">
+          <div><span class="kicker purple">РАСПИСАНИЕ</span><h2>Все регулярные операции</h2></div>
+          <span class="count-label" id="recurringCount">0 операций</span>
+        </div>
+        <div class="recurring-grid" id="recurringList"></div>
+      </section>
+
+      <section class="page" id="accounts">
+        <div class="accounts-hero">
+          <div><span>Деньги на всех счетах</span><b class="sensitive" id="accountsTotal">0 ₽</b><small id="accountsCount">0 счетов</small></div>
+          <div class="accounts-hero-actions">
+            <button class="button account-transfer-button" data-open-modal="transfer">⇄ Перевести</button>
+            <button class="button primary" data-open-modal="account">＋ Новый счёт</button>
+          </div>
+        </div>
+        <div class="account-grid" id="accountCards"></div>
+        <article class="card transfer-history-card">
+          <div class="card-title-row">
+            <div><span class="kicker purple">МЕЖДУ СЧЕТАМИ</span><h2>Последние переводы</h2></div>
+            <span class="count-label" id="transferCount">0 переводов</span>
+          </div>
+          <div class="transfer-list" id="transferList"></div>
+        </article>
+      </section>
+
+      <section class="page" id="debts">
+        <div class="debt-summary">
+          <article class="debt-total">
+            <span>Общая сумма долга</span><b class="sensitive" id="debtTotal">0 ₽</b><small id="debtMonthly">0 ₽ в месяц</small>
+          </article>
+          <button class="button primary" data-open-modal="debt">＋ Добавить долг</button>
+        </div>
+        <div class="debt-list" id="debtList"></div>
+      </section>
+
+      <section class="page" id="calendar">
+        <div class="calendar-hero">
+          <div>
+            <span class="kicker">ПЛАТЁЖНЫЙ РИТМ</span>
+            <h2 id="calendarTitle">Календарь платежей</h2>
+            <p id="calendarSummary">Все обязательства выбранного месяца</p>
+          </div>
+          <div class="calendar-controls">
+            <button class="calendar-arrow" id="calendarPrev" aria-label="Предыдущий месяц">←</button>
+            <button class="calendar-today" id="calendarToday">Сегодня</button>
+            <button class="calendar-arrow" id="calendarNext" aria-label="Следующий месяц">→</button>
+          </div>
+        </div>
+        <div class="calendar-layout">
+          <article class="card calendar-card">
+            <div class="calendar-weekdays">
+              <span>Пн</span><span>Вт</span><span>Ср</span><span>Чт</span><span>Пт</span><span>Сб</span><span>Вс</span>
+            </div>
+            <div class="calendar-grid" id="calendarGrid"></div>
+            <div class="calendar-legend">
+              <span><i class="legend-credit"></i>Кредит</span>
+              <span><i class="legend-micro"></i>Микрозайм</span>
+              <span><i class="legend-personal"></i>Личный долг</span>
+              <span><i class="legend-recurring"></i>Регулярный платёж</span>
+            </div>
+          </article>
+          <aside class="card calendar-plan">
+            <div class="card-title-row">
+              <div><span class="kicker orange">В ЭТОМ МЕСЯЦЕ</span><h2>План платежей</h2></div>
+              <div class="calendar-total"><small>Всего</small><b class="sensitive" id="calendarTotal">0 ₽</b></div>
+            </div>
+            <div class="calendar-event-list" id="calendarEventList"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="page" id="analytics">
+        <div class="analytics-hero">
+          <div>
+            <span class="kicker">ФИНАНСОВЫЙ ГОРИЗОНТ</span>
+            <h2>Прогноз и капитал</h2>
+            <p id="forecastSummary">Прогноз строится по вашим операциям, регулярным платежам и долгам.</p>
+          </div>
+          <div class="analytics-hero-metrics">
+            <span>Чистый капитал сейчас<b class="sensitive" id="currentNetWorth">0 ₽</b></span>
+            <span>Баланс через 6 месяцев<b class="sensitive" id="forecastBalance">0 ₽</b></span>
+            <span>Изменение<b id="forecastChange">0%</b></span>
+          </div>
+        </div>
+
+        <div class="analytics-grid analytics-forecast-grid">
+          <article class="card chart-card">
+            <div class="card-title-row">
+              <div><span class="kicker purple">ПРОГНОЗ</span><h2>Баланс на 6 месяцев</h2></div>
+              <span class="count-label">Плановые значения</span>
+            </div>
+            <div class="forecast-chart" id="balanceForecastChart"></div>
+            <small class="chart-note">Учитываются средние нерегулярные операции, расписания и кредитные платежи.</small>
+          </article>
+          <article class="card comparison-card">
+            <div class="card-title-row">
+              <div><span class="kicker orange">СРАВНЕНИЕ</span><h2>Этот месяц и прошлый</h2></div>
+            </div>
+            <div class="comparison-list">
+              <div><span>Доходы<small id="compareIncomeHint">к прошлому месяцу</small></span><b class="sensitive" id="compareIncome">0 ₽</b><em id="compareIncomeDelta">0%</em></div>
+              <div><span>Расходы<small id="compareExpenseHint">к прошлому месяцу</small></span><b class="sensitive" id="compareExpense">0 ₽</b><em id="compareExpenseDelta">0%</em></div>
+              <div><span>Итог месяца<small id="compareNetHint">доходы минус расходы</small></span><b class="sensitive" id="compareNet">0 ₽</b><em id="compareNetDelta">0%</em></div>
+            </div>
+          </article>
+        </div>
+
+        <div class="analytics-grid">
+          <article class="card chart-card">
+            <div class="card-title-row">
+              <div><span class="kicker purple">ДИНАМИКА</span><h2>Доходы и расходы</h2></div>
+              <span class="count-label">6 месяцев</span>
+            </div>
+            <div class="legend"><span><i class="income-dot"></i>Доходы</span><span><i class="expense-dot"></i>Расходы</span></div>
+            <div class="bar-chart" id="monthlyChart"></div>
+          </article>
+          <article class="card">
+            <div class="card-title-row">
+              <div><span class="kicker orange">СТРУКТУРА</span><h2>Куда уходят деньги</h2></div>
+            </div>
+            <div class="category-chart" id="categoryChart"></div>
+          </article>
+        </div>
+
+        <article class="card capital-card">
+          <div class="card-title-row">
+            <div><span class="kicker">КАПИТАЛ</span><h2>Динамика чистого капитала</h2></div>
+            <span class="count-label">Счета минус долги</span>
+          </div>
+          <div class="capital-chart" id="capitalChart"></div>
+        </article>
+
+        <article class="card strategy-card">
+          <div class="strategy-head">
+            <div><span class="kicker purple">СТРАТЕГИЯ ДОЛГОВ</span><h2>Снежный ком или лавина</h2><p>Сравните скорость закрытия долгов и переплату по процентам.</p></div>
+            <label>Дополнительно каждый месяц<input id="strategyExtraPayment" type="number" min="0" step="500" value="5000"></label>
+          </div>
+          <div class="strategy-grid" id="strategyResults"></div>
+        </article>
+      </section>
+
+      <section class="page" id="settings">
+        <div class="settings-grid">
+          <form class="card settings-form" id="settingsForm">
+            <div class="card-title-row"><div><span class="kicker purple">ПАРАМЕТРЫ</span><h2>Личные настройки</h2></div></div>
+            <label>Ваше имя<input id="userName" placeholder="Как к вам обращаться"></label>
+            <label>Электронная почта<input id="userEmail" type="email" placeholder="name@example.ru"></label>
+            <label>Стартовый баланс основного счёта<input id="openingBalance" type="number" min="0" step="100"></label>
+            <label>Финансовая подушка — цель<input id="reserveTarget" type="number" min="0" step="100"></label>
+            <label>Уже отложено<input id="reserveSaved" type="number" min="0" step="100"></label>
+            <label>Валюта<select id="currency"><option value="₽">Российский рубль (₽)</option><option value="$">Доллар ($)</option><option value="€">Евро (€)</option></select></label>
+            <button class="button primary" type="submit">Сохранить настройки</button>
+          </form>
+
+          <article class="card security-card">
+            <div class="card-title-row"><div><span class="kicker purple">БЕЗОПАСНОСТЬ</span><h2>Защита приложения</h2></div><span class="security-shield">⌾</span></div>
+            <div class="security-status">
+              <span><i class="status-dot active" id="passwordStatusDot"></i><b>Пароль</b><small id="passwordStatusText">Включён при регистрации</small></span>
+              <span><i class="status-dot" id="pinStatusDot"></i><b>PIN-код</b><small id="pinStatusText">Не настроен</small></span>
+              <span><i class="status-dot" id="biometricStatusDot"></i><b>Биометрия</b><small id="biometricStatusText">Не настроена</small></span>
+              <span><i class="status-dot" id="storageEncryptionStatusDot"></i><b>Локальная база</b><small id="storageEncryptionStatusText">Проверка защиты…</small></span>
+            </div>
+            <form id="pinForm" class="pin-form">
+              <label>Новый PIN<input id="securityPin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" placeholder="4–6 цифр" required></label>
+              <label>Повторите PIN<input id="securityPinConfirm" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" placeholder="Ещё раз" required></label>
+              <button class="button primary" type="submit">Сохранить PIN</button>
+            </form>
+            <div class="security-preferences">
+              <label>Автоблокировка
+                <select id="autoLockMinutes">
+                  <option value="1">Через 1 минуту</option>
+                  <option value="5">Через 5 минут</option>
+                  <option value="15">Через 15 минут</option>
+                  <option value="30">Через 30 минут</option>
+                </select>
+              </label>
+              <label class="security-check"><input id="lockOnHide" type="checkbox"><span><b>Блокировать в фоне</b><small>После 15 секунд вне приложения</small></span></label>
+            </div>
+            <div class="security-actions">
+              <button class="button secondary small" id="biometricSetupButton">◉ Настроить биометрию</button>
+              <button class="button secondary small" id="removeBiometricButton" hidden>Отключить биометрию</button>
+              <button class="button secondary small" id="removePinButton" hidden>Удалить PIN</button>
+              <button class="button danger small" id="lockNowButton">Заблокировать сейчас</button>
+            </div>
+            <small class="security-hint" id="securityAutoLockHint">Автоблокировка срабатывает через 5 минут бездействия.</small>
+            <small class="security-hint">После полного закрытия приложения база открывается только паролем. PIN и биометрия не ослабляют шифрование и работают в текущем сеансе.</small>
+          </article>
+
+          <article class="card data-card">
+            <div class="card-title-row"><div><span class="kicker">ДАННЫЕ</span><h2>Резервная копия</h2></div></div>
+            <div class="data-action"><span class="stat-icon lilac">⇩</span><div><b>Скачать копию</b><small>Зашифровать паролем перед сохранением</small></div><button class="button secondary small" id="exportButton">Скачать</button></div>
+            <label class="data-action"><span class="stat-icon sky">⇧</span><div><b>Загрузить копию</b><small>Поддерживаются защищённые и старые копии</small></div><span class="button secondary small">Выбрать</span><input type="file" id="importInput" accept=".kopilka,.json,application/json,application/octet-stream" hidden></label>
+            <div class="data-action"><span class="stat-icon mint">✓</span><div><b>Формат данных</b><small id="schemaVersionText">Версия —</small></div><span class="count-label">Авто</span></div>
+            <div class="data-action danger-zone"><span class="stat-icon coral">×</span><div><b>Очистить данные</b><small>Удалить всё с устройства</small></div><button class="button danger small" id="resetButton">Очистить</button></div>
+            <div class="data-action"><span class="stat-icon sunshine">◉</span><div><b>Стартовый экран</b><small>Посмотреть или изменить профиль</small></div><button class="button secondary small" id="showOnboardingButton">Открыть</button></div>
+            <button class="install-card" id="installButton" hidden>
+              <span class="install-icon">⬇</span>
+              <span><b>Установить «Копилку»</b><small>Работает как отдельное приложение и доступна офлайн</small></span>
+              <i>→</i>
+            </button>
+          </article>
+
+          <article class="card sync-card" id="syncCard" hidden>
+            <div class="card-title-row"><div><span class="kicker">ОБЛАКО</span><h2>Синхронизация</h2></div><span class="security-shield">☁</span></div>
+            <div class="security-status">
+              <span><i class="status-dot" id="syncStatusDot"></i><b id="syncStatusTitle">Не подключено</b><small id="syncStatusText">Войдите, чтобы данные были на всех устройствах</small></span>
+            </div>
+
+            <form id="syncAuthForm" class="sync-form">
+              <label>Электронная почта<input id="syncEmail" type="email" autocomplete="email" placeholder="name@example.ru" required></label>
+              <label>Пароль синхронизации<input id="syncPassword" type="password" autocomplete="current-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
+              <div class="sync-actions">
+                <button class="button primary" type="submit" id="syncSignInButton">Войти</button>
+                <button class="button secondary" type="button" id="syncSignUpButton">Создать аккаунт</button>
+              </div>
+              <small class="security-hint">Финансы шифруются на устройстве до отправки. Сервер видит только зашифрованный файл. Пароль синхронизации восстановить нельзя — забудете, данные в облаке не расшифровать.</small>
+            </form>
+
+            <div id="syncSignedIn" class="sync-signed-in" hidden>
+              <div class="data-action"><span class="stat-icon sky">☁</span><div><b id="syncAccountEmail">—</b><small id="syncLastSynced">Ещё не синхронизировано</small></div><button class="button secondary small" id="syncNowButton">Синхронизировать</button></div>
+              <div class="sync-actions">
+                <button class="button secondary small" id="syncSignOutButton">Выйти из облака</button>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="bottom-nav" aria-label="Мобильная навигация">
+    <button class="active nav-dashboard" data-page="dashboard"><span><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 10v9h13v-9M9 19v-5h6v5"/></svg></span>Обзор</button>
+    <button class="nav-operations" data-page="operations"><span><svg viewBox="0 0 24 24"><path d="M7 4v16m0-16-3 3m3-3 3 3m7 13V4m0 16-3-3m3 3 3-3"/></svg></span>Операции</button>
+    <button class="quick-add" id="mobileQuickAdd" aria-label="Добавить операцию">＋</button>
+    <button class="nav-payments" id="mobilePayments" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><path d="M4 6.5h16v13H4zM8 3.5v5m8-5v5M4 10h16M8 14h2m4 0h2"/></svg></span>Платежи</button>
+    <button class="nav-more" id="mobileMore" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span>Ещё</button>
+  </nav>
+  <div class="mobile-add-menu" id="mobileAddMenu" hidden>
+    <button class="mobile-add-income" data-open-modal="income"><span>＋</span><b>Добавить доход</b><small>Зарплата, перевод, возврат</small></button>
+    <button class="mobile-add-expense" data-open-modal="expense"><span>−</span><b>Добавить расход</b><small>Покупка, платёж, подписка</small></button>
+    <button class="mobile-add-transfer" data-open-modal="transfer"><span>⇄</span><b>Сделать перевод</b><small>Между своими счетами</small></button>
+    <button class="mobile-add-recurring" data-open-modal="recurring"><span>↻</span><b>Регулярная операция</b><small>Подписка, зарплата, ЖКХ</small></button>
+  </div>
+  <div class="mobile-group-menu mobile-payments-menu" id="mobilePaymentsMenu" hidden>
+    <button data-page="recurring"><span class="mint">↻</span><b>Регулярные</b><small>Подписки и зарплаты</small></button>
+    <button data-page="debts"><span class="coral">◎</span><b>Долги</b><small>Кредиты и платежи</small></button>
+    <button data-page="calendar"><span class="sunshine">▦</span><b>Календарь</b><small>Все даты оплаты</small></button>
+  </div>
+  <div class="mobile-group-menu mobile-more-menu" id="mobileMoreMenu" hidden>
+    <button data-page="accounts"><span class="sky">▣</span><b>Счета</b><small>Карты и наличные</small></button>
+    <button data-page="analytics"><span class="lilac">⌁</span><b>Аналитика</b><small>Прогнозы и отчёты</small></button>
+    <button data-page="settings"><span class="neutral">⚙</span><b>Настройки</b><small>Профиль и безопасность</small></button>
+  </div>
+
+  <div class="modal-backdrop" id="modalBackdrop" aria-hidden="true">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="modal-head"><div><span class="kicker" id="modalKicker">НОВАЯ ЗАПИСЬ</span><h2 id="modalTitle">Добавить</h2></div><button class="modal-close" id="modalClose" aria-label="Закрыть">×</button></div>
+
+      <form id="operationForm" class="modal-form">
+        <input type="hidden" id="operationId">
+        <input type="hidden" id="operationType">
+        <div class="amount-field"><span id="amountSign">−</span><input id="operationAmount" type="number" min="0" step="0.01" placeholder="0" required><em id="amountCurrency">₽</em></div>
+        <div class="form-grid">
+          <label>Категория<select id="operationCategory" required></select></label>
+          <label>Дата<input id="operationDate" type="date" required></label>
+          <label>Счёт<select id="operationAccount" required></select></label>
+          <label>Комментарий<input id="operationNote" placeholder="Необязательно"></label>
+        </div>
+        <button class="button primary wide" type="submit">Сохранить операцию</button>
+      </form>
+
+      <form id="debtForm" class="modal-form" hidden>
+        <input type="hidden" id="debtId">
+        <div class="form-grid">
+          <label>Тип<select id="debtKind"><option value="credit">Кредит</option><option value="micro">Микрозайм</option><option value="personal">Личный долг</option></select></label>
+          <label>Название<input id="debtName" placeholder="Например, автокредит" required></label>
+          <label>Схема платежей<select id="debtRepaymentType"><option value="annuity">Аннуитетная</option><option value="differentiated">Дифференцированная</option></select></label>
+          <label>Банковское округление<select id="debtRounding"><option value="kopecks">До копеек</option><option value="rubles">До целых рублей</option></select></label>
+          <label>Текущий остаток долга<input id="debtBalance" type="number" min="0" step="0.01" required></label>
+          <label>Количество платежей<input id="debtTermPayments" type="number" min="1" step="1" placeholder="Например, 36" required></label>
+          <label>Уже внесено платежей<input id="debtPaymentsMade" type="number" min="0" step="1" value="0" required></label>
+          <label>Дата взятия кредита<input id="debtIssueDate" type="date" required></label>
+          <label>Дата первого платежа<input id="debtFirstPaymentDate" type="date" required></label>
+          <label>Первый платёж банка<input id="debtFirstPaymentAmount" type="number" min="0" step="0.01" placeholder="Если отличается"></label>
+          <label>Платёж банка<input id="debtPayment" type="number" min="0" step="0.01" placeholder="Пусто — рассчитать автоматически"></label>
+          <label>Ставка, % годовых<input id="debtRate" type="number" min="0" step="0.01"></label>
+          <label>Ежемесячная комиссия<input id="debtMonthlyFee" type="number" min="0" step="0.01" value="0"></label>
+          <label>Комиссия с платежа, %<input id="debtPaymentFeePercent" type="number" min="0" step="0.01" value="0"></label>
+          <label>Пени за просрочку, % в день<input id="debtPenaltyRateDaily" type="number" min="0" step="0.001" value="0"></label>
+        </div>
+        <div class="debt-preview" id="debtPreview">
+          <small>Предварительный расчёт следующего платежа</small>
+          <div><span>Всего к оплате<b id="previewPayment">0 ₽</b></span><span>Комиссия<b id="previewCommission">0 ₽</b></span><span>Пени<b id="previewPenalty">0 ₽</b></span><span>В проценты<b id="previewInterest">0 ₽</b></span><span>В тело кредита<b id="previewPrincipal">0 ₽</b></span><span>Осталось<b id="previewRemaining">0 платежей</b></span></div>
+        </div>
+        <button class="button primary wide" type="submit">Сохранить долг</button>
+      </form>
+
+      <form id="paymentForm" class="modal-form" hidden>
+        <input type="hidden" id="paymentDebtId">
+        <div class="payment-credit-summary">
+          <span>Текущий остаток<small id="paymentCurrentBalance">0 ₽</small></span>
+          <span>Платёж по графику<small id="paymentScheduledAmount">0 ₽</small></span>
+        </div>
+        <label class="payment-amount-label">Платёж по кредиту и пени, без комиссии<input id="paymentAmount" type="number" min="0.01" step="0.01" required></label>
+        <label>Списать со счёта<select id="paymentAccount" required></select></label>
+        <label class="early-toggle"><input id="earlyRepaymentEnabled" type="checkbox"><span><b>Добавить досрочное погашение</b><small>Дополнительная сумма полностью уменьшит основной долг</small></span></label>
+        <div class="early-fields" id="earlyRepaymentFields" hidden>
+          <label>Досрочная сумма<input id="earlyRepaymentAmount" type="number" min="0" step="0.01" value="0"></label>
+          <label>Что уменьшить<select id="earlyRepaymentStrategy"><option value="term">Срок кредита</option><option value="payment">Размер платежа</option></select></label>
+        </div>
+        <div class="debt-preview">
+          <small>Как распределится платёж</small>
+          <div>
+            <span>Всего к оплате<b id="paymentTotal">0 ₽</b></span>
+            <span>Комиссия<b id="paymentCommission">0 ₽</b></span>
+            <span>Пени<b id="paymentPenalty">0 ₽</b></span>
+            <span>В проценты<b id="paymentInterest">0 ₽</b></span>
+            <span>В тело кредита<b id="paymentPrincipal">0 ₽</b></span>
+            <span>Новый остаток<b id="paymentNewBalance">0 ₽</b></span>
+            <span>Останется<b id="paymentRemainingCount">0 платежей</b></span>
+          </div>
+        </div>
+        <div class="payment-warning" id="paymentWarning" hidden></div>
+        <button class="button primary wide" type="submit">Учесть платёж</button>
+      </form>
+
+      <form id="accountForm" class="modal-form" hidden>
+        <input type="hidden" id="accountId">
+        <div class="account-type-picker" id="accountTypePicker">
+          <button type="button" class="active" data-account-type="card"><span>▣</span>Карта</button>
+          <button type="button" data-account-type="cash"><span>₽</span>Наличные</button>
+          <button type="button" data-account-type="savings"><span>◇</span>Накопительный</button>
+        </div>
+        <input type="hidden" id="accountType" value="card">
+        <div class="form-grid">
+          <label>Название счёта<input id="accountName" placeholder="Например, Зарплатная карта" required></label>
+          <label>Стартовый баланс<input id="accountOpeningBalance" type="number" step="0.01" value="0" required></label>
+        </div>
+        <button class="button primary wide" type="submit">Сохранить счёт</button>
+      </form>
+
+      <form id="transferForm" class="modal-form" hidden>
+        <div class="form-grid">
+          <label>Со счёта<select id="transferFrom" required></select></label>
+          <label>На счёт<select id="transferTo" required></select></label>
+          <label>Сумма<input id="transferAmount" type="number" min="0.01" step="0.01" required></label>
+          <label>Дата<input id="transferDate" type="date" required></label>
+          <label class="form-wide">Комментарий<input id="transferNote" placeholder="Необязательно"></label>
+        </div>
+        <div class="transfer-preview" id="transferPreview">Выберите два разных счёта</div>
+        <button class="button primary wide" type="submit">Выполнить перевод</button>
+      </form>
+
+      <form id="recurringForm" class="modal-form" hidden>
+        <input type="hidden" id="recurringId">
+        <div class="form-grid">
+          <label>Шаблон<select id="recurringKind"><option value="salary">Зарплата</option><option value="subscription">Подписка</option><option value="utilities">Коммунальный платёж</option><option value="other">Другое</option></select></label>
+          <label>Название<input id="recurringName" placeholder="Например, Интернет" required></label>
+          <label>Тип<select id="recurringType"><option value="expense">Расход</option><option value="income">Доход</option></select></label>
+          <label>Категория<select id="recurringCategory" required></select></label>
+          <label>Сумма<input id="recurringAmount" type="number" min="0.01" step="0.01" required></label>
+          <label>Счёт<select id="recurringAccount" required></select></label>
+          <label>Периодичность<select id="recurringFrequency"><option value="monthly">Каждый месяц</option><option value="weekly">Каждую неделю</option><option value="yearly">Каждый год</option></select></label>
+          <label>Следующая дата<input id="recurringNextDate" type="date" required></label>
+          <label>Напомнить заранее<select id="recurringRemindDays"><option value="0">В день операции</option><option value="1">За 1 день</option><option value="3" selected>За 3 дня</option><option value="5">За 5 дней</option><option value="7">За неделю</option></select></label>
+        </div>
+        <label class="early-toggle"><input id="recurringAutoPost" type="checkbox" checked><span><b>Создавать операцию автоматически</b><small>Когда наступит дата, запись появится в доходах или расходах</small></span></label>
+        <button class="button primary wide" type="submit">Сохранить расписание</button>
+      </form>
+
+      <form id="backupForm" class="modal-form" hidden>
+        <input type="hidden" id="backupMode">
+        <p class="backup-description" id="backupDescription"></p>
+        <label>Пароль резервной копии<input id="backupPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов" required></label>
+        <label id="backupConfirmLabel">Повторите пароль<input id="backupPasswordConfirm" type="password" autocomplete="new-password" minlength="8" placeholder="Ещё раз"></label>
+        <div class="encryption-note"><span>⌾</span><div><b>Шифрование AES-256</b><small>Без этого пароля открыть резервную копию будет невозможно.</small></div></div>
+        <button class="button primary wide" id="backupSubmitButton" type="submit">Зашифровать и скачать</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="sync-config.js"></script>
+  <script src="modules/migrations.js"></script>
+  <script src="modules/finance.js"></script>
+  <script src="modules/security.js"></script>
+  <script src="modules/sync.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

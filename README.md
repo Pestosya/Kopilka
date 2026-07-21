@@ -32,7 +32,7 @@
 - зашифрованные резервные копии AES-256 с отдельным паролем;
 - одинаковый набор основных функций на компьютере и телефоне.
 
-## Запуск
+## Локальный запуск
 
 Откройте папку в локальном веб-сервере и перейдите на `index.html`. Например:
 
@@ -43,16 +43,6 @@ python3 -m http.server 4173
 После этого откройте `http://localhost:4173`. В разделе «Настройки» браузер предложит установить приложение, если поддерживает PWA.
 
 Все финансовые данные хранятся локально в браузере. Для надёжности периодически скачивайте резервную копию в разделе «Настройки».
-
-## Публикация на GitHub Pages
-
-Фронтенд — статический, поэтому раздаётся бесплатно через GitHub Pages (CDN, выдерживает большое число пользователей).
-
-1. Закоммитьте и запушьте проект в ветку `main`.
-2. В репозитории: **Settings → Pages → Build and deployment → Source → GitHub Actions**.
-3. Workflow `.github/workflows/deploy.yml` прогоняет тесты и публикует сайт при каждом пуше.
-
-Приложение откроется на `https://<пользователь>.github.io/<репозиторий>/`.
 
 ## Аккаунты и синхронизация (Supabase)
 
@@ -90,3 +80,46 @@ python3 -m http.server 4173
 ```bash
 npm test
 ```
+
+## Production-сборка
+
+Для публикации создаётся отдельная папка `dist/`: в неё попадают только файлы
+приложения — тесты, SQL-схема и служебные файлы наружу не публикуются.
+
+```bash
+cp .env.example .env
+# заполните публичные параметры Supabase, затем экспортируйте их из .env
+set -a; source .env; set +a
+npm run ci
+python3 -m http.server 4173 --directory dist
+```
+
+`KOPILKA_SUPABASE_PUBLISHABLE_KEY` является публичным браузерным ключом. Никогда
+не используйте здесь `sb_secret_...` или service-role key.
+
+## GitHub Actions и GitHub Pages
+
+Workflow `.github/workflows/deploy.yml` проверяет каждый pull request, а после
+push в `main` собирает чистый artifact и публикует его в GitHub Pages.
+
+1. В **Settings → Pages** выберите источник **GitHub Actions**.
+2. В **Settings → Secrets and variables → Actions → Variables** добавьте:
+   `KOPILKA_SUPABASE_URL` и `KOPILKA_SUPABASE_PUBLISHABLE_KEY`.
+3. Запушьте `main` или запустите workflow вручную.
+
+Если variables ещё не заданы, сборка использует текущий публичный конфиг из
+`sync-config.js`, поэтому существующий деплой продолжит работать.
+
+## Свой сервер (Docker)
+
+```bash
+cp .env.example .env
+# заполните .env
+docker compose up -d --build
+curl --fail http://localhost:8080/health
+```
+
+Контейнер раздаёт приложение на порту `8080`, работает с read-only filesystem,
+автоматически перезапускается и имеет health-check. Для публичного домена
+поставьте перед ним Caddy, nginx или Traefik с HTTPS. PWA и Web Crypto требуют
+защищённого контекста (HTTPS), кроме локального `localhost`.

@@ -1,0 +1,18 @@
+services:
+  kopilka:
+    build:
+      context: .
+      args:
+        KOPILKA_SUPABASE_URL: ${KOPILKA_SUPABASE_URL:-}
+        KOPILKA_SUPABASE_PUBLISHABLE_KEY: ${KOPILKA_SUPABASE_PUBLISHABLE_KEY:-}
+    image: kopilka:latest
+    restart: unless-stopped
+    ports:
+      - "${KOPILKA_PORT:-8080}:8080"
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    security_opt:
+      - no-new-privileges:true

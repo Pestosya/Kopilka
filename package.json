@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
+    "build": "node scripts/build.mjs",
     "test": "node --test",
-    "check": "node --check app.js && node --test"
+    "check": "node --check app.js && node --check service-worker.js && node --test",
+    "ci": "npm run check && npm run build"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

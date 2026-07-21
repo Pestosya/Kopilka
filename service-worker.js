@@ -1,4 +1,4 @@
-const CACHE = "kopilka-v30";
+const CACHE = "kopilka-dev";
 const ASSETS = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
   "./sync-config.js",
@@ -23,13 +23,21 @@ self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   // Внешние запросы (Supabase Auth/REST) не кэшируем и не перехватываем.
   if (url.origin !== self.location.origin) return;
-  event.respondWith(
-    caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
-      const copy = response.clone();
-      caches.open(CACHE).then(cache => cache.put(event.request, copy));
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request).catch(() => caches.match("./index.html"))
+    );
+    return;
+  }
+
+  // Быстрый ответ из кэша с фоновым обновлением статических ресурсов.
+  event.respondWith(caches.match(event.request).then(cached => {
+    const network = fetch(event.request).then(response => {
+      if (response.ok) caches.open(CACHE).then(cache => cache.put(event.request, response.clone()));
       return response;
-    }).catch(() => (event.request.mode === "navigate" ? caches.match("./index.html") : undefined)))
-  );
+    });
+    return cached || network;
+  }));
 });
 
 self.addEventListener("notificationclick", event => {

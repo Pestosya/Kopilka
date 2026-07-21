@@ -1,0 +1,9 @@
+.git
+.github
+dist
+node_modules
+npm-debug.log
+README.md
+supabase
+tests
+.env*

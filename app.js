@@ -84,6 +84,7 @@ const pageMeta = {
 
 let activeProfileId = "";
 let creatingNewProfile = false;
+let authMode = "login";
 let previousProfileId = "";
 let pendingEncryptedProfile = null;
 let vaultKeyBytes = null;
@@ -1777,14 +1778,16 @@ function closeDesktopAddMenu() {
 }
 
 function renderProfileMenu() {
-  const displayName = state.settings.name || state.settings.login || "Пользователь";
-  const login = state.settings.login || displayName;
+  const displayName = state.settings.name || state.settings.email || state.settings.login || "Пользователь";
+  const account = state.settings.email || state.settings.login || "";
   const avatar = profileAvatarMarkup(state.settings);
-  document.querySelector("#profileTriggerName").textContent = displayName;
   document.querySelector("#profileTriggerAvatar").innerHTML = avatar;
+  document.querySelector("#profileTriggerName").textContent = displayName;
   document.querySelector("#profileMenuAvatar").innerHTML = avatar;
   document.querySelector("#profileMenuName").textContent = displayName;
-  document.querySelector("#profileMenuLogin").textContent = `@${login}`;
+  document.querySelector("#profileMenuLogin").textContent = account
+    ? (account.includes("@") ? account : `@${account}`)
+    : "";
   document.querySelector("#profileThemeIcon").textContent = state.settings.theme === "dark" ? "☀" : "☾";
   document.querySelector("#profileThemeLabel").textContent =
     state.settings.theme === "dark" ? "Светлая тема" : "Тёмная тема";
@@ -1908,21 +1911,23 @@ function resizeProfilePhoto(file) {
 }
 
 function fillOnboarding() {
-  const hasProfile = state.settings.profileCreated && !creatingNewProfile;
-  document.querySelector("#onboardingLogin").value = state.settings.login || state.settings.name || "";
-  document.querySelector("#onboardingPassword").value = "";
-  document.querySelector("#onboardingTitle").textContent = creatingNewProfile
-    ? "Создайте ещё один аккаунт"
-    : hasProfile ? "Изменить данные входа" : "Создайте личный кабинет";
-  document.querySelector("#onboardingIntro").textContent = hasProfile
-    ? "Укажите новый логин и пароль для этого устройства."
-    : creatingNewProfile
-      ? "У нового аккаунта будут отдельные операции, счета, долги и настройки."
-      : "Придумайте логин и пароль. Других данных для регистрации не требуется.";
-  document.querySelector("#onboardingSubmit").innerHTML = hasProfile
-    ? `Сохранить данные <span>→</span>`
-    : `Создать кабинет <span>→</span>`;
-  document.querySelector("#onboardingClose").hidden = !hasProfile && !creatingNewProfile;
+  const register = authMode === "register";
+  const passwordField = document.querySelector("#onboardingPassword");
+  passwordField.value = "";
+  passwordField.setAttribute("autocomplete", register ? "new-password" : "current-password");
+  document.querySelector("#onboardingError").textContent = "";
+  document.querySelector("#onboardingTitle").textContent = register
+    ? "Создайте аккаунт"
+    : "Вход в Копилку";
+  document.querySelector("#onboardingIntro").textContent = register
+    ? "Почта и пароль — всё, что нужно. Финансы шифруются на устройстве."
+    : "Войдите в аккаунт, чтобы ваши финансы были доступны на всех устройствах.";
+  document.querySelector("#onboardingSubmit").innerHTML = register
+    ? `Зарегистрироваться <span>→</span>`
+    : `Войти <span>→</span>`;
+  document.querySelector("#onboardingToggle").textContent = register
+    ? "Уже есть аккаунт? Войти"
+    : "Нет аккаунта? Зарегистрироваться";
 }
 
 function showOnboarding() {
@@ -2906,6 +2911,7 @@ document.querySelector("#unlockForm").addEventListener("submit", async event => 
       if (securityChanged) await saveState();
       submitButton.disabled = false;
       unlockApp();
+      if (passwordMatches) { try { cloudSync.resume(code); } catch (_) { /* синхронизация продолжит позже */ } }
       showToast("Кабинет открыт");
       return;
     } catch (error) {
@@ -2995,9 +3001,32 @@ document.querySelector("#removeBiometricButton").addEventListener("click", () =>
 });
 
 document.querySelector("#lockNowButton").addEventListener("click", lockApp);
+function logoutAccount() {
+  cloudSync.signOut();
+  // Локальный зашифрованный кэш убираем — данные остаются в облаке, вход снова через экран входа.
+  if (activeProfileId) {
+    try {
+      localStorage.removeItem(profileStorageKey(activeProfileId));
+      saveProfileRegistry(loadProfileRegistry().filter(profile => profile.id !== activeProfileId));
+      localStorage.removeItem(ACTIVE_PROFILE_KEY);
+    } catch (_) { /* хранилище недоступно */ }
+  }
+  activeProfileId = "";
+  vaultKeyBytes = null;
+  pendingEncryptedProfile = null;
+  appUnlocked = false;
+  document.querySelector("#appLock").hidden = true;
+  state = clone(DEFAULT_STATE);
+  authMode = "login";
+  renderAll();
+  showOnboarding();
+  showToast("Вы вышли из аккаунта");
+}
+
 document.querySelector("#profileLogoutButton").addEventListener("click", () => {
+  if (!confirm("Выйти из аккаунта? Данные останутся в облаке, войти можно снова с любого устройства.")) return;
   closeProfileMenu();
-  lockApp();
+  logoutAccount();
 });
 document.querySelector("#profileSettingsButton").addEventListener("click", () => {
   closeProfileMenu();
@@ -3076,43 +3105,47 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
 
 document.querySelector("#onboardingForm").addEventListener("submit", async event => {
   event.preventDefault();
-  const existingProfile = state.settings.profileCreated && !creatingNewProfile;
-  const login = document.querySelector("#onboardingLogin").value.trim();
+  const email = document.querySelector("#onboardingEmail").value.trim();
   const password = document.querySelector("#onboardingPassword").value;
-  if (!isStrongPassword(password)) {
-    showToast("Пароль должен содержать минимум 8 символов, буквы и цифры");
+  const errorField = document.querySelector("#onboardingError");
+  const submitButton = document.querySelector("#onboardingSubmit");
+  const register = authMode === "register";
+  errorField.textContent = "";
+  if (!cloudSync.available()) {
+    errorField.textContent = "Серверная синхронизация не настроена.";
     return;
   }
-  const duplicate = loadProfileRegistry().some(profile =>
-    (creatingNewProfile || profile.id !== activeProfileId)
-      && String(profile.login).toLowerCase() === login.toLowerCase()
-  );
-  if (duplicate) {
-    showToast("Аккаунт с таким логином уже есть на устройстве");
-    return;
+  submitButton.disabled = true;
+  try {
+    await cloudSync.enterAccount(email, password, register);
+    processRecurringOperations();
+    renderAll();
+    hideOnboarding();
+    unlockApp();
+    showPage("dashboard");
+    showToast(register ? "Аккаунт создан" : "С возвращением!");
+  } catch (error) {
+    if (error.code === "confirm_email") {
+      errorField.textContent = "Подтвердите почту по ссылке из письма, затем войдите.";
+    } else if (error.code === "unauthorized") {
+      errorField.textContent = register
+        ? "Такой аккаунт уже существует. Войдите."
+        : "Неверная почта или пароль.";
+    } else if (error.code === "offline") {
+      errorField.textContent = "Нет связи с сервером. Проверьте интернет.";
+    } else {
+      errorField.textContent = error.message || "Не удалось войти.";
+    }
+  } finally {
+    submitButton.disabled = false;
   }
-  if (creatingNewProfile) activeProfileId = uid();
-  state.settings.login = login;
-  state.settings.passwordHash = await createSecretHash(password);
-  if (!state.settings.name || !existingProfile) state.settings.name = login;
-  state.settings.profileCreated = true;
-  if (!vaultKeyBytes) vaultKeyBytes = randomBytes(32);
-  state.settings.encryptedAtRest = true;
-  state.settings.vaultPasswordWrap = await wrapVaultKey(vaultKeyBytes, password);
-  await saveState();
-  creatingNewProfile = false;
-  previousProfileId = "";
-  newProfileReturnState = null;
-  newProfileReturnVault = null;
-  newProfileReturnPending = null;
-  renderAll();
-  hideOnboarding();
-  unlockApp();
-  showPage("dashboard");
-  showToast(existingProfile ? "Данные входа обновлены" : "Личный кабинет создан");
 });
 
-document.querySelector("#onboardingClose").addEventListener("click", cancelOnboarding);
+document.querySelector("#onboardingToggle").addEventListener("click", () => {
+  authMode = authMode === "register" ? "login" : "register";
+  fillOnboarding();
+  document.querySelector("#onboardingEmail").focus();
+});
 document.querySelector("#showOnboardingButton").addEventListener("click", showOnboarding);
 
 document.querySelector("#autoLockMinutes").addEventListener("change", event => {
@@ -3344,6 +3377,63 @@ const cloudSync = (() => {
     persistMeta();
   }
 
+  // Вход/регистрация как единственный способ попасть в приложение.
+  // Загружает хранилище аккаунта с сервера (или заводит пустое) и настраивает
+  // локальное шифрование этого устройства. Бросает SyncError при ошибке.
+  async function enterAccount(email, password, create) {
+    if (!available()) throw new KopilkaSync.SyncError("Синхронизация не настроена", "not_configured");
+    email = String(email || "").trim().toLowerCase();
+    if (!email || !password) throw new KopilkaSync.SyncError("Введите почту и пароль", "input");
+    if (create && !isStrongPassword(password)) {
+      throw new KopilkaSync.SyncError("Пароль: минимум 8 символов, буквы и цифры", "weak");
+    }
+
+    const authKey = await deriveAuthKey(password, email);
+    let established;
+    if (create) {
+      const res = await client.signUp(email, authKey);
+      if (res.needsConfirmation) throw new KopilkaSync.SyncError("confirm_email", "confirm_email");
+      established = res.session;
+    } else {
+      established = await client.signIn(email, authKey);
+    }
+
+    session = { ...established, email };
+    secret = password;
+    meta.email = email;
+    activeProfileId = session.userId || uid();
+
+    const token = await ensureToken();
+    const remote = await client.pullVault(token);
+    if (remote) {
+      const key = await unwrapVaultKey(remote.keyWrap, password);
+      const data = await decryptWithRawKey(remote.ciphertext, key);
+      state = hydrateState(migrateData(data));
+      meta.version = remote.version;
+    } else {
+      state = hydrateState(clone(DEFAULT_STATE));
+      meta.version = 0;
+    }
+
+    // Локальный кэш шифруется собственным ключом устройства, обёрнутым паролем.
+    vaultKeyBytes = randomBytes(32);
+    pendingEncryptedProfile = null;
+    state.settings.email = email;
+    state.settings.login = email;
+    if (!state.settings.name) state.settings.name = email.split("@")[0];
+    state.settings.encryptedAtRest = true;
+    state.settings.vaultPasswordWrap = await wrapVaultKey(vaultKeyBytes, password);
+    // Хеш пароля нужен локальному экрану разблокировки после перезапуска (офлайн-вход).
+    state.settings.passwordHash = await createSecretHash(password);
+    state.settings.profileCreated = true;
+    meta.lastSyncedAt = Date.now();
+    persistMeta();
+
+    await saveState();
+    if (!remote) await pushNow();
+    return { email };
+  }
+
   function schedulePush() {
     if (!available() || !session || !secret || applying) return;
     clearTimeout(pushTimer);
@@ -3448,6 +3538,15 @@ const cloudSync = (() => {
     renderCard();
   }
 
+  // Возобновление сессии после локальной разблокировки паролем (перезапуск/офлайн-вход).
+  // Пароль совпал с локальным хешем, значит им же можно продолжить синхронизацию.
+  function resume(password) {
+    if (!available() || !session) { renderCard(); return; }
+    secret = password;
+    renderCard();
+    syncNow().catch(() => { /* фоновая досинхронизация не критична */ });
+  }
+
   function formatSynced(ts) {
     if (!ts) return "Ещё не синхронизировано";
     return `Последняя синхронизация: ${formatDate(new Date(ts).toISOString().slice(0, 10))}`;
@@ -3491,7 +3590,9 @@ const cloudSync = (() => {
   }
 
   return {
-    available, init, renderCard, schedulePush, syncNow,
+    available, init, renderCard, schedulePush, syncNow, enterAccount, resume,
+    hasSession: () => Boolean(session),
+    currentEmail: () => meta.email,
     signIn: (email, password) => authenticate(email, password, false),
     signUp: (email, password) => authenticate(email, password, true),
     signOut: localSignOut
@@ -3507,7 +3608,10 @@ if (cloudSync.available()) {
     cloudSync.signUp(document.querySelector("#syncEmail").value, document.querySelector("#syncPassword").value);
   });
   document.querySelector("#syncNowButton").addEventListener("click", () => cloudSync.syncNow());
-  document.querySelector("#syncSignOutButton").addEventListener("click", () => cloudSync.signOut());
+  document.querySelector("#syncSignOutButton").addEventListener("click", () => {
+    if (!confirm("Выйти из аккаунта? Данные останутся в облаке.")) return;
+    logoutAccount();
+  });
 }
 
 const initialPage = location.hash.slice(1);

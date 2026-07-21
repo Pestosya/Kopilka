@@ -1,4 +1,4 @@
-const CACHE = "kopilka-v29";
+const CACHE = "kopilka-v30";
 const ASSETS = [
   "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
   "./sync-config.js",

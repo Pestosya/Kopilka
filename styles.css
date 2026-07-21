@@ -211,6 +211,8 @@ button { cursor: pointer; }
 .button.danger { color: #d94c3a; background: var(--coral-soft); }
 .button.small { min-height: 36px; padding: 0 12px; font-size: 12px; }
 .button.wide { width: 100%; margin-top: 8px; }
+.button.ghost { background: transparent; color: var(--muted); font-weight: 600; min-height: 38px; }
+.button.ghost:hover { color: var(--text); transform: none; }
 .icon-button, .mobile-menu { width: 44px; height: 44px; color: var(--muted); background: var(--surface-solid); border: 1px solid var(--line); font-size: 19px; }
 .reminder-button { position:relative; }
 .reminder-button span { position:absolute; right:-4px; top:-5px; display:grid; place-items:center; min-width:17px; height:17px; padding:0 4px; border:2px solid var(--surface-solid); border-radius:999px; color:#fff; background:var(--coral); font-size:7px; font-weight:800; }

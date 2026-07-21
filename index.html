@@ -45,8 +45,8 @@
         <h1>Возьмите финансы<br>под свой контроль</h1>
         <p>Доходы, расходы, кредиты и платёжный календарь — в одном приватном пространстве.</p>
         <div class="onboarding-benefits">
-          <span><i>✓</i>Данные остаются на устройстве</span>
-          <span><i>✓</i>Работает без интернета</span>
+          <span><i>✓</i>Данные на всех ваших устройствах</span>
+          <span><i>✓</i>Сквозное шифрование финансов</span>
           <span><i>✓</i>Никаких банковских паролей</span>
         </div>
       </div>
@@ -54,14 +54,15 @@
     </div>
     <div class="onboarding-panel">
       <form class="onboarding-form" id="onboardingForm">
-        <button class="onboarding-close" id="onboardingClose" type="button" hidden>← Вернуться в кабинет</button>
         <span class="kicker purple">ДОБРО ПОЖАЛОВАТЬ</span>
-        <h2 id="onboardingTitle">Создайте личный кабинет</h2>
-        <p id="onboardingIntro">Придумайте логин и пароль. Других данных для регистрации не требуется.</p>
-        <label>Логин<input id="onboardingLogin" autocomplete="username" placeholder="Ваш логин" required></label>
-        <label>Пароль<input id="onboardingPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
-        <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit">Создать кабинет <span>→</span></button>
-        <div class="onboarding-privacy"><i>●</i><span><b>Приватная регистрация</b><small>Логин и защищённый отпечаток пароля хранятся только на этом устройстве.</small></span></div>
+        <h2 id="onboardingTitle">Вход в Копилку</h2>
+        <p id="onboardingIntro">Войдите в аккаунт, чтобы ваши финансы были доступны на всех устройствах.</p>
+        <label>Электронная почта<input id="onboardingEmail" type="email" autocomplete="email" placeholder="name@example.ru" required></label>
+        <label>Пароль<input id="onboardingPassword" type="password" autocomplete="current-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
+        <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit">Войти <span>→</span></button>
+        <button class="button ghost wide" id="onboardingToggle" type="button">Нет аккаунта? Зарегистрироваться</button>
+        <small class="lock-error" id="onboardingError" role="alert"></small>
+        <div class="onboarding-privacy"><i>●</i><span><b>Сквозное шифрование</b><small>Финансы шифруются на устройстве. Сервер хранит только зашифрованный файл и не может их прочитать.</small></span></div>
       </form>
     </div>
   </section>
@@ -135,7 +136,7 @@
                 <div><b id="profileMenuName">Пользователь</b><small id="profileMenuLogin">@user</small></div>
               </div>
               <input id="profileAvatarInput" type="file" accept="image/*" hidden>
-              <div class="profile-accounts">
+              <div class="profile-accounts" id="profileAccountsSection" hidden>
                 <small class="profile-section-label">АККАУНТЫ НА УСТРОЙСТВЕ</small>
                 <div class="profile-list" id="profileList"></div>
                 <button class="profile-action profile-add-account" id="addProfileButton" type="button"><span>＋</span><b>Добавить аккаунт</b></button>

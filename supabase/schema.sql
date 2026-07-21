@@ -1,6 +1,53 @@
--- Копилка — серверная схема синхронизации.
+-- Копилка — серверная схема (гибрид).
 -- Вставьте это целиком в Supabase → SQL Editor → New query → Run.
--- Сервер хранит ТОЛЬКО зашифрованный на устройстве blob. Открытых финансов здесь нет.
+-- Финансы хранятся ТОЛЬКО зашифрованным blob (сервер их не видит),
+-- а несекретные метаданные аккаунта — обычными строками в profiles.
+
+-- 0. Профиль аккаунта: несекретные метаданные (имя, аватар, активность).
+--    Финансов здесь нет — только то, что можно показывать без расшифровки.
+create table if not exists public.profiles (
+  user_id      uuid primary key references auth.users (id) on delete cascade,
+  display_name text,
+  avatar       text,
+  locale       text        not null default 'ru',
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now(),
+  last_seen_at timestamptz
+);
+
+alter table public.profiles enable row level security;
+grant select, insert, update on public.profiles to authenticated;
+
+drop policy if exists "profile_select_own" on public.profiles;
+create policy "profile_select_own" on public.profiles
+  for select using (auth.uid() = user_id);
+
+drop policy if exists "profile_upsert_own" on public.profiles;
+create policy "profile_upsert_own" on public.profiles
+  for insert with check (auth.uid() = user_id);
+
+drop policy if exists "profile_update_own" on public.profiles;
+create policy "profile_update_own" on public.profiles
+  for update using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Автозаведение строки профиля при регистрации нового пользователя.
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  insert into public.profiles (user_id, display_name)
+    values (new.id, split_part(new.email, '@', 1))
+  on conflict (user_id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
 
 -- 1. Таблица зашифрованных хранилищ: одна строка на пользователя.
 create table if not exists public.vaults (

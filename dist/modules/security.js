@@ -181,6 +181,17 @@
     return JSON.parse(new TextDecoder().decode(decrypted));
   }
 
+  // Детерминированный ключ авторизации для сервера. Одинаков на всех устройствах
+  // при одном пароле и email, но выведен по ФИКСИРОВАННОЙ соли-контексту, отличной
+  // от случайных солей шифрования базы. Поэтому сервер, зная authKey, не может
+  // получить ключ расшифровки данных (E2E). Возвращает строку для поля password.
+  async function deriveAuthKey(password, email, iterations = PASSWORD_ITERATIONS) {
+    const context = `kopilka-auth-v1|${String(email || "").trim().toLowerCase()}`;
+    const salt = new TextEncoder().encode(context);
+    const bytes = await derivePbkdf2Bytes(password, salt, iterations);
+    return `kpk_${bytesToBase64Url(bytes)}`;
+  }
+
   async function wrapVaultKey(rawKey, secret, iterations = BACKUP_ITERATIONS) {
     return encryptPayload({ key: bytesToBase64(rawKey) }, secret, iterations);
   }
@@ -208,6 +219,7 @@
     decryptPayload,
     encryptWithRawKey,
     decryptWithRawKey,
+    deriveAuthKey,
     wrapVaultKey,
     unwrapVaultKey
   };

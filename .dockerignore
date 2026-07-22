@@ -1,9 +1,7 @@
-.git
-.github
-dist
 node_modules
-npm-debug.log
-README.md
-supabase
-tests
-.env*
+.env
+server/data
+.DS_Store
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

@@ -2,11 +2,16 @@
   "name": "kopilka-finance",
   "version": "1.0.0",
   "private": true,
+  "type": "commonjs",
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
     "test": "node --test",
-    "check": "node --check app.js && node --check service-worker.js && node --test",
-    "ci": "npm run check && npm run build"
+    "check": "node --check app.js && node --check server/index.js && node --check server/storage.js && node --test"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "express": "^4.21.2"
   },
   "engines": {
     "node": ">=20"

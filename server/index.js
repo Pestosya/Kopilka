@@ -10,7 +10,10 @@ const APP_ROOT = path.resolve(__dirname, "..");
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const SESSION_COOKIE = "kopilka_session";
-const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
+// Явный COOKIE_SECURE=false позволяет работать по голому HTTP (например, до настройки HTTPS).
+const COOKIE_SECURE = process.env.COOKIE_SECURE
+  ? process.env.COOKIE_SECURE === "true"
+  : process.env.NODE_ENV === "production";
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const MAX_VAULT_JSON_BYTES = 8 * 1024 * 1024;
 

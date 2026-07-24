@@ -1,6 +1,6 @@
-const CACHE = "kopilka-v31-design-refresh";
+const CACHE = "kopilka-v32-mobile-nav";
 const ASSETS = [
-  "./", "./index.html", "./styles.css?v=31", "./app.js", "./manifest.webmanifest",
+  "./", "./index.html", "./styles.css?v=32", "./app.js", "./manifest.webmanifest",
   "./modules/migrations.js", "./modules/finance.js", "./modules/security.js",
   "./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"
 ];

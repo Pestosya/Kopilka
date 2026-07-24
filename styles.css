@@ -1300,6 +1300,7 @@ select {
   .mobile-add-recurring > span { background:linear-gradient(145deg,#ffce56,#e9a30a); }
   .mobile-group-menu { position:fixed; z-index:79; left:50%; bottom:calc(82px + env(safe-area-inset-bottom)); transform:translateX(-50%); width:min(360px,calc(100% - 24px)); display:grid; grid-template-columns:repeat(3,1fr); gap:8px; padding:10px; border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--surface-solid) 96%,transparent); box-shadow:0 22px 60px rgba(38,29,70,.2); backdrop-filter:blur(22px); }
   .mobile-group-menu[hidden] { display:none; }
+  .mobile-more-menu { grid-template-columns:repeat(2,1fr); width:min(300px,calc(100% - 24px)); }
   .mobile-group-menu button { display:grid; place-items:center; align-content:center; gap:5px; min-width:0; min-height:84px; padding:9px 5px; border:0; border-radius:var(--radius); color:var(--text); background:var(--surface-soft); text-align:center; }
   .mobile-group-menu button > span { display:grid; place-items:center; width:34px; height:34px; border-radius:var(--radius); font-size:16px; font-weight:800; }
   .mobile-group-menu button > span.mint { color:var(--mint); background:var(--mint-soft); }

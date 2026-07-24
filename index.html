@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=31">
+  <link rel="stylesheet" href="styles.css?v=32">
 </head>
 <body>
   <section class="app-lock" id="appLock">
@@ -62,7 +62,7 @@
         <label>Логин<input id="onboardingLogin" autocomplete="username" placeholder="Ваш логин" required></label>
         <label>Пароль<input id="onboardingPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
         <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit" data-auth-action="login">Войти <span>→</span></button>
-        <button class="button secondary wide onboarding-existing" id="existingAccountButton" type="submit" data-auth-action="register">Создать новый аккаунт</button>
+        <button class="button secondary wide onboarding-existing" id="existingAccountButton" type="button" data-auth-action="register">Создать новый аккаунт</button>
         <small class="onboarding-local-note" id="onboardingLocalNote">Старые локальные кабинеты отключены: вход и синхронизация теперь идут через сервер.</small>
         <div class="onboarding-privacy"><i>●</i><span><b>Приватная регистрация</b><small>Суммы и финансовые записи отправляются в базу только как зашифрованный сейф.</small></span></div>
       </form>
@@ -491,8 +491,8 @@
   <nav class="bottom-nav" aria-label="Мобильная навигация">
     <button class="active nav-dashboard" data-page="dashboard"><span><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 10v9h13v-9M9 19v-5h6v5"/></svg></span>Обзор</button>
     <button class="nav-operations" data-page="operations"><span><svg viewBox="0 0 24 24"><path d="M7 4v16m0-16-3 3m3-3 3 3m7 13V4m0 16-3-3m3 3 3-3"/></svg></span>Операции</button>
-    <button class="quick-add" id="mobileQuickAdd" aria-label="Добавить операцию">＋</button>
-    <button class="nav-payments" id="mobilePayments" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><path d="M4 6.5h16v13H4zM8 3.5v5m8-5v5M4 10h16M8 14h2m4 0h2"/></svg></span>Платежи</button>
+    <button class="quick-add" id="mobileQuickAdd" aria-label="Добавить операцию" aria-expanded="false">＋</button>
+    <button class="nav-payments" id="mobilePayments" type="button" aria-label="Открыть план платежей" aria-expanded="false"><span><svg viewBox="0 0 24 24"><path d="M4 6.5h16v13H4zM8 3.5v5m8-5v5M4 10h16M8 14h2m4 0h2"/></svg></span>План</button>
     <button class="nav-more" id="mobileMore" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span>Ещё</button>
   </nav>
   <div class="mobile-add-menu" id="mobileAddMenu" hidden>
@@ -509,7 +509,6 @@
   <div class="mobile-group-menu mobile-more-menu" id="mobileMoreMenu" hidden>
     <button data-page="accounts"><span class="sky">▣</span><b>Счета</b><small>Карты и наличные</small></button>
     <button data-page="analytics"><span class="lilac">⌁</span><b>Аналитика</b><small>Прогнозы и отчёты</small></button>
-    <button data-page="settings"><span class="neutral">⚙</span><b>Настройки</b><small>Профиль и безопасность</small></button>
   </div>
 
   <div class="modal-backdrop" id="modalBackdrop" aria-hidden="true">

@@ -573,7 +573,16 @@ async function apiRequest(path, options = {}) {
     throw requestError;
   }
   const text = await response.text();
-  const data = text ? JSON.parse(text) : {};
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      const parseError = new Error("Серверная часть не отвечает как API. Проверьте, что приложение запущено через Node.js backend, а не только как статические файлы.");
+      parseError.code = "BAD_API_RESPONSE";
+      throw parseError;
+    }
+  }
   if (!response.ok) {
     const error = new Error(data.message || "Сервер вернул ошибку");
     error.code = data.code || "SERVER_ERROR";
@@ -1958,6 +1967,7 @@ function resizeProfilePhoto(file) {
 
 function fillOnboarding() {
   const hasProfile = Boolean(currentUser || state.settings.profileCreated);
+  authMode = AUTH_MODE_LOGIN;
   document.querySelector("#onboardingLogin").value = hasProfile ? "" : (state.settings.login || "");
   document.querySelector("#onboardingPassword").value = "";
   document.querySelector("#onboardingTitle").textContent = "Войдите в личный кабинет";
@@ -2126,7 +2136,7 @@ function showPage(pageId) {
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === pageId));
   document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === pageId));
   document.querySelector("#mobilePayments").classList.toggle("active", ["recurring", "debts", "calendar"].includes(pageId));
-  document.querySelector("#mobileMore").classList.toggle("active", ["accounts", "analytics", "settings"].includes(pageId));
+  document.querySelector("#mobileMore").classList.toggle("active", ["accounts", "analytics"].includes(pageId));
   document.querySelector("#eyebrow").textContent = pageMeta[pageId][0];
   document.querySelector("#pageTitle").textContent = pageId === "dashboard" && state.settings.name.trim()
     ? `Добрый день, ${state.settings.name.trim()}!`
@@ -2650,10 +2660,12 @@ document.addEventListener("click", event => {
   const mobileMoreMenu = document.querySelector("#mobileMoreMenu");
   if (quickAddButton) {
     mobileAddMenu.hidden = !mobileAddMenu.hidden;
+    quickAddButton.setAttribute("aria-expanded", String(!mobileAddMenu.hidden));
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
   } else if (!event.target.closest("#mobileAddMenu")) {
     mobileAddMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
   }
   if (mobilePaymentsButton) {
     mobilePaymentsMenu.hidden = !mobilePaymentsMenu.hidden;
@@ -2677,6 +2689,7 @@ document.addEventListener("click", event => {
     mobileAddMenu.hidden = true;
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     document.querySelector("#mobilePayments").setAttribute("aria-expanded", "false");
     document.querySelector("#mobileMore").setAttribute("aria-expanded", "false");
     closeDesktopAddMenu();
@@ -2691,6 +2704,7 @@ document.addEventListener("click", event => {
     mobileAddMenu.hidden = true;
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     closeDesktopAddMenu();
     const modalType = modalButton.dataset.openModal;
     if (modalType === "debt") openDebtModal();
@@ -2834,6 +2848,7 @@ document.addEventListener("keydown", event => {
     document.querySelector("#mobileAddMenu").hidden = true;
     document.querySelector("#mobilePaymentsMenu").hidden = true;
     document.querySelector("#mobileMoreMenu").hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     document.querySelector("#mobilePayments").setAttribute("aria-expanded", "false");
     document.querySelector("#mobileMore").setAttribute("aria-expanded", "false");
   }
@@ -3258,15 +3273,10 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
   showToast("Настройки сохранены");
 });
 
-document.querySelectorAll("#onboardingForm [data-auth-action]").forEach(button => {
-  button.addEventListener("click", () => {
-    authMode = button.dataset.authAction || AUTH_MODE_LOGIN;
-  });
-});
-
-document.querySelector("#onboardingForm").addEventListener("submit", async event => {
-  event.preventDefault();
-  const action = event.submitter?.dataset.authAction || authMode || AUTH_MODE_LOGIN;
+async function handleOnboardingAuth(action = AUTH_MODE_LOGIN) {
+  const submitButton = document.querySelector("#onboardingSubmit");
+  const createButton = document.querySelector("#existingAccountButton");
+  if (submitButton.disabled || createButton.disabled) return;
   const login = document.querySelector("#onboardingLogin").value.trim();
   const password = document.querySelector("#onboardingPassword").value;
   if (!login) {
@@ -3280,6 +3290,12 @@ document.querySelector("#onboardingForm").addEventListener("submit", async event
   const buttons = [...document.querySelectorAll("#onboardingForm button")];
   buttons.forEach(button => { button.disabled = true; });
   authErrorText = "";
+  document.querySelector("#onboardingLocalNote").textContent = action === AUTH_MODE_REGISTER
+    ? "Создаём зашифрованный сейф и серверный аккаунт. На телефоне это может занять несколько секунд."
+    : "Проверяем логин и расшифровываем зашифрованный сейф.";
+  submitButton.innerHTML = action === AUTH_MODE_REGISTER ? "Создаём… <span>→</span>" : "Входим… <span>→</span>";
+  createButton.textContent = action === AUTH_MODE_REGISTER ? "Создаём защищённый аккаунт…" : "Создать новый аккаунт";
+  await new Promise(resolve => setTimeout(resolve, 0));
   try {
     if (action === AUTH_MODE_REGISTER) await registerRemoteAccount(login, password);
     else await loginRemoteAccount(login, password);
@@ -3289,7 +3305,22 @@ document.querySelector("#onboardingForm").addEventListener("submit", async event
     showToast(authErrorText);
   } finally {
     buttons.forEach(button => { button.disabled = false; });
+    if (!document.querySelector("#onboarding").hidden) fillOnboarding();
   }
+}
+
+document.querySelector("#onboardingSubmit").addEventListener("click", () => {
+  authMode = AUTH_MODE_LOGIN;
+});
+
+document.querySelector("#existingAccountButton").addEventListener("click", () => {
+  authMode = AUTH_MODE_REGISTER;
+  handleOnboardingAuth(AUTH_MODE_REGISTER);
+});
+
+document.querySelector("#onboardingForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  await handleOnboardingAuth(event.submitter?.dataset.authAction || authMode || AUTH_MODE_LOGIN);
 });
 
 document.querySelector("#onboardingClose").addEventListener("click", cancelOnboarding);

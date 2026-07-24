@@ -5,3 +5,12 @@ server/data
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+.git
+.github
+dist
+tests
+deploy
+scripts
+supabase
+compose.yml
+Dockerfile

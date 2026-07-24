@@ -1,18 +1,27 @@
 services:
   kopilka:
-    build:
-      context: .
-      args:
-        KOPILKA_SUPABASE_URL: ${KOPILKA_SUPABASE_URL:-}
-        KOPILKA_SUPABASE_PUBLISHABLE_KEY: ${KOPILKA_SUPABASE_PUBLISHABLE_KEY:-}
-    image: kopilka:latest
+    image: ghcr.io/pestosya/kopilka:latest
+    build: .
     restart: unless-stopped
     ports:
-      - "${KOPILKA_PORT:-8080}:8080"
-    read_only: true
-    tmpfs:
-      - /var/cache/nginx
-      - /var/run
-      - /tmp
+      - "${KOPILKA_PORT:-3000}:3000"
+    environment:
+      # NODE_ENV=production включает Secure-cookie: вход работает только по HTTPS
+      # (за реверс-прокси). Для теста по голому HTTP задайте NODE_ENV=development
+      # в .env рядом с этим файлом.
+      NODE_ENV: ${NODE_ENV:-production}
+      DB_PATH: /data/kopilka.sqlite
+      SESSION_DAYS: ${SESSION_DAYS:-30}
+      TRUST_PROXY: ${TRUST_PROXY:-1}
+    volumes:
+      - kopilka-data:/data
     security_opt:
       - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  kopilka-data:

@@ -1,0 +1,13 @@
+{
+	auto_https off
+}
+
+# HTTPS-вход в Копилку. Порты 80/443 на сервере заняты другим nginx,
+# поэтому живём на 8443 с самоподписанным сертификатом из /opt/kopilka/certs
+# (браузер покажет предупреждение один раз). При появлении рабочего домена
+# заменить на автоматический сертификат Let's Encrypt.
+https://:8443 {
+	tls /certs/kopilka.crt /certs/kopilka.key
+	encode gzip
+	reverse_proxy kopilka:3000
+}

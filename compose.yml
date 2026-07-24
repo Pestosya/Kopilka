@@ -24,5 +24,18 @@ services:
       timeout: 5s
       retries: 3
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - kopilka
+    security_opt:
+      - no-new-privileges:true
+
 volumes:
   kopilka-data:

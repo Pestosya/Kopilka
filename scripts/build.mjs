@@ -9,7 +9,7 @@ const files = [
   "index.html", "styles.css", "app.js", "manifest.webmanifest",
   "service-worker.js", "icon.svg", "icon-192.png", "icon-512.png",
   "apple-touch-icon.png", "modules/migrations.js", "modules/finance.js",
-  "modules/security.js", "modules/sync.js"
+  "modules/security.js"
 ];
 
 function validSupabaseUrl(value) {

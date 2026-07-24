@@ -196,6 +196,19 @@ function escapeHtml(value) {
   })[char]);
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  const email = normalizeEmail(value);
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
+function emailDisplayName(email) {
+  return normalizeEmail(email).split("@")[0] || "Пользователь";
+}
+
 function bankRound(value, debt) {
   const factor = debt?.rounding === "rubles" ? 1 : 100;
   return Math.round((Number(value || 0) + Number.EPSILON) * factor) / factor;
@@ -524,6 +537,7 @@ function lockedProfileState(summary = {}) {
   lockedState.settings = {
     ...lockedState.settings,
     login: summary.login || "",
+    email: summary.email || summary.login || "",
     name: summary.name || summary.login || "",
     avatar: summary.avatar || "",
     autoLockMinutes: Number(summary.autoLockMinutes || 5),
@@ -628,6 +642,7 @@ function prepareStateForRemote(profileState = state) {
   if (currentUser?.id) {
     snapshot.settings.profileCreated = true;
     snapshot.settings.login = currentUser.login || snapshot.settings.login;
+    snapshot.settings.email = snapshot.settings.email || currentUser.login || snapshot.settings.login;
     snapshot.settings.name = snapshot.settings.name || currentUser.name || snapshot.settings.login;
     snapshot.settings.encryptedAtRest = true;
   }
@@ -1897,7 +1912,7 @@ function renderProfileMenu() {
   document.querySelector("#profileTriggerAvatar").innerHTML = avatar;
   document.querySelector("#profileMenuAvatar").innerHTML = avatar;
   document.querySelector("#profileMenuName").textContent = displayName;
-  document.querySelector("#profileMenuLogin").textContent = `@${login}`;
+  document.querySelector("#profileMenuLogin").textContent = login;
   document.querySelector("#profileThemeIcon").textContent = state.settings.theme === "dark" ? "☀" : "☾";
   document.querySelector("#profileThemeLabel").textContent =
     state.settings.theme === "dark" ? "Светлая тема" : "Тёмная тема";
@@ -1905,7 +1920,7 @@ function renderProfileMenu() {
   document.querySelector("#profileList").innerHTML = currentUser
     ? `<div class="profile-account active">
         <span class="profile-account-avatar">${avatar}</span>
-        <span class="profile-account-copy"><b>${escapeHtml(displayName)}</b><small>серверный аккаунт @${escapeHtml(login)}</small></span>
+        <span class="profile-account-copy"><b>${escapeHtml(displayName)}</b><small>серверный аккаунт · ${escapeHtml(login)}</small></span>
         <span class="profile-account-check">✓</span>
       </div>`
     : `<div class="profile-account">
@@ -1972,7 +1987,7 @@ function fillOnboarding() {
   document.querySelector("#onboardingPassword").value = "";
   document.querySelector("#onboardingTitle").textContent = "Войдите в личный кабинет";
   document.querySelector("#onboardingIntro").textContent =
-    "Введите логин и пароль. Данные подтянутся с сервера на любом вашем устройстве.";
+    "Введите электронную почту и пароль. Данные подтянутся с сервера на любом вашем устройстве.";
   document.querySelector("#onboardingSubmit").innerHTML = `Войти <span>→</span>`;
   document.querySelector("#onboardingSubmit").dataset.authAction = AUTH_MODE_LOGIN;
   document.querySelector("#existingAccountButton").hidden = false;
@@ -1981,7 +1996,7 @@ function fillOnboarding() {
   document.querySelector("#onboardingClose").hidden = !hasProfile;
   document.querySelector("#onboardingLocalNote").hidden = false;
   document.querySelector("#onboardingLocalNote").textContent =
-    authErrorText || "Старые локальные кабинеты отключены: вход и синхронизация теперь идут через сервер.";
+    authErrorText || "Почта используется как уникальный логин: два аккаунта с одной почтой создать нельзя.";
 }
 
 function showOnboarding() {
@@ -1993,6 +2008,7 @@ function showOnboarding() {
 
 function hideOnboarding() {
   document.querySelector("#onboarding").hidden = true;
+  document.querySelector("#registrationDialog").hidden = true;
   document.body.style.overflow = "";
   releaseViewport("onboarding");
 }
@@ -2015,10 +2031,12 @@ function resetToSignedOutState(message = "") {
   purgeLegacyLocalAccounts();
 }
 
-async function createEncryptedInitialVault(login, password) {
+async function createEncryptedInitialVault(email, password, name = "") {
+  const displayName = String(name || "").trim() || emailDisplayName(email);
   const initialState = hydrateState(clone(DEFAULT_STATE));
-  initialState.settings.login = login;
-  initialState.settings.name = login;
+  initialState.settings.login = email;
+  initialState.settings.email = email;
+  initialState.settings.name = displayName;
   initialState.settings.passwordHash = await createSecretHash(password);
   initialState.settings.profileCreated = true;
   initialState.settings.encryptedAtRest = true;
@@ -2028,16 +2046,21 @@ async function createEncryptedInitialVault(login, password) {
   return { initialState, envelope, wrap: initialState.settings.vaultPasswordWrap };
 }
 
-async function registerRemoteAccount(login, password) {
-  const { initialState, envelope, wrap } = await createEncryptedInitialVault(login, password);
+async function checkEmailAvailability(email) {
+  return apiRequest(`/api/auth/check?email=${encodeURIComponent(email)}`);
+}
+
+async function registerRemoteAccount(email, password, name = "") {
+  const displayName = String(name || "").trim() || emailDisplayName(email);
+  const { initialState, envelope, wrap } = await createEncryptedInitialVault(email, password, displayName);
   const result = await apiRequest("/api/auth/register", {
     method: "POST",
     body: {
-      login,
+      login: email,
       password,
       envelope,
       wrap,
-      profile: { name: login, avatar: "" }
+      profile: { name: displayName, avatar: "" }
     }
   });
   currentUser = result.user;
@@ -2843,6 +2866,7 @@ document.querySelector("#modalBackdrop").addEventListener("click", event => {
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     closeModal();
+    if (!document.querySelector("#registrationDialog").hidden) closeRegistrationDialog();
     closeDesktopAddMenu();
     closeProfileMenu();
     document.querySelector("#mobileAddMenu").hidden = true;
@@ -3277,10 +3301,15 @@ async function handleOnboardingAuth(action = AUTH_MODE_LOGIN) {
   const submitButton = document.querySelector("#onboardingSubmit");
   const createButton = document.querySelector("#existingAccountButton");
   if (submitButton.disabled || createButton.disabled) return;
-  const login = document.querySelector("#onboardingLogin").value.trim();
+  const email = normalizeEmail(document.querySelector("#onboardingLogin").value);
   const password = document.querySelector("#onboardingPassword").value;
-  if (!login) {
-    showToast("Введите логин");
+  document.querySelector("#onboardingLogin").value = email;
+  if (!email) {
+    showToast("Введите электронную почту");
+    return;
+  }
+  if (!isValidEmail(email)) {
+    showToast("Введите корректную электронную почту");
     return;
   }
   if (!isStrongPassword(password)) {
@@ -3290,15 +3319,11 @@ async function handleOnboardingAuth(action = AUTH_MODE_LOGIN) {
   const buttons = [...document.querySelectorAll("#onboardingForm button")];
   buttons.forEach(button => { button.disabled = true; });
   authErrorText = "";
-  document.querySelector("#onboardingLocalNote").textContent = action === AUTH_MODE_REGISTER
-    ? "Создаём зашифрованный сейф и серверный аккаунт. На телефоне это может занять несколько секунд."
-    : "Проверяем логин и расшифровываем зашифрованный сейф.";
-  submitButton.innerHTML = action === AUTH_MODE_REGISTER ? "Создаём… <span>→</span>" : "Входим… <span>→</span>";
-  createButton.textContent = action === AUTH_MODE_REGISTER ? "Создаём защищённый аккаунт…" : "Создать новый аккаунт";
+  document.querySelector("#onboardingLocalNote").textContent = "Проверяем почту и расшифровываем зашифрованный сейф.";
+  submitButton.innerHTML = "Входим… <span>→</span>";
   await new Promise(resolve => setTimeout(resolve, 0));
   try {
-    if (action === AUTH_MODE_REGISTER) await registerRemoteAccount(login, password);
-    else await loginRemoteAccount(login, password);
+    await loginRemoteAccount(email, password);
   } catch (error) {
     authErrorText = error.message || "Не удалось выполнить вход";
     fillOnboarding();
@@ -3309,13 +3334,87 @@ async function handleOnboardingAuth(action = AUTH_MODE_LOGIN) {
   }
 }
 
+function openRegistrationDialog() {
+  authErrorText = "";
+  document.querySelector("#registrationName").value = "";
+  document.querySelector("#registrationEmail").value = normalizeEmail(document.querySelector("#onboardingLogin").value);
+  document.querySelector("#registrationPassword").value = "";
+  document.querySelector("#registrationPasswordConfirm").value = "";
+  document.querySelector("#registrationNote").textContent = "Два аккаунта с одной почтой создать нельзя.";
+  document.querySelector("#registrationSubmit").innerHTML = "Создать защищённый аккаунт <span>→</span>";
+  document.querySelector("#registrationDialog").hidden = false;
+  setTimeout(() => {
+    const target = document.querySelector("#registrationName").value
+      ? document.querySelector("#registrationEmail")
+      : document.querySelector("#registrationName");
+    target.focus();
+  }, 80);
+}
+
+function closeRegistrationDialog() {
+  document.querySelector("#registrationDialog").hidden = true;
+  document.querySelector("#existingAccountButton").focus();
+}
+
+async function handleRegistrationSubmit() {
+  const name = document.querySelector("#registrationName").value.trim();
+  const email = normalizeEmail(document.querySelector("#registrationEmail").value);
+  const password = document.querySelector("#registrationPassword").value;
+  const confirmation = document.querySelector("#registrationPasswordConfirm").value;
+  const note = document.querySelector("#registrationNote");
+  const submitButton = document.querySelector("#registrationSubmit");
+  const buttons = [...document.querySelectorAll("#registrationForm button")];
+  document.querySelector("#registrationEmail").value = email;
+  if (!name) {
+    showToast("Введите имя");
+    document.querySelector("#registrationName").focus();
+    return;
+  }
+  if (!isValidEmail(email)) {
+    showToast("Введите корректную электронную почту");
+    document.querySelector("#registrationEmail").focus();
+    return;
+  }
+  if (!isStrongPassword(password)) {
+    showToast("Пароль должен содержать минимум 8 символов, буквы и цифры");
+    document.querySelector("#registrationPassword").focus();
+    return;
+  }
+  if (password !== confirmation) {
+    showToast("Пароли не совпадают");
+    document.querySelector("#registrationPasswordConfirm").focus();
+    return;
+  }
+  buttons.forEach(button => { button.disabled = true; });
+  submitButton.innerHTML = "Проверяем почту… <span>→</span>";
+  note.textContent = "Проверяем, свободна ли эта почта.";
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    const availability = await checkEmailAvailability(email);
+    if (!availability.available) {
+      throw new Error("Аккаунт с такой почтой уже существует. Войдите или используйте другую почту.");
+    }
+    submitButton.innerHTML = "Создаём сейф… <span>→</span>";
+    note.textContent = "Почта свободна. Создаём зашифрованный сейф и серверный аккаунт.";
+    await registerRemoteAccount(email, password, name);
+  } catch (error) {
+    note.textContent = error.message || "Не удалось создать аккаунт";
+    showToast(note.textContent);
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    if (!document.querySelector("#registrationDialog").hidden) {
+      submitButton.innerHTML = "Создать защищённый аккаунт <span>→</span>";
+    }
+  }
+}
+
 document.querySelector("#onboardingSubmit").addEventListener("click", () => {
   authMode = AUTH_MODE_LOGIN;
 });
 
 document.querySelector("#existingAccountButton").addEventListener("click", () => {
   authMode = AUTH_MODE_REGISTER;
-  handleOnboardingAuth(AUTH_MODE_REGISTER);
+  openRegistrationDialog();
 });
 
 document.querySelector("#onboardingForm").addEventListener("submit", async event => {
@@ -3323,6 +3422,15 @@ document.querySelector("#onboardingForm").addEventListener("submit", async event
   await handleOnboardingAuth(event.submitter?.dataset.authAction || authMode || AUTH_MODE_LOGIN);
 });
 
+document.querySelector("#registrationForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  await handleRegistrationSubmit();
+});
+document.querySelector("#registrationClose").addEventListener("click", closeRegistrationDialog);
+document.querySelector("#registrationBackToLogin").addEventListener("click", closeRegistrationDialog);
+document.querySelector("#registrationDialog").addEventListener("click", event => {
+  if (event.target.id === "registrationDialog") closeRegistrationDialog();
+});
 document.querySelector("#onboardingClose").addEventListener("click", cancelOnboarding);
 document.querySelector("#showOnboardingButton").addEventListener("click", logoutRemote);
 

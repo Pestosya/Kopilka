@@ -11,7 +11,7 @@ const PORT = Number(process.env.PORT || 3000);
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 30);
 const SESSION_COOKIE = "kopilka_session";
 const COOKIE_SECURE = process.env.COOKIE_SECURE === "true" || process.env.NODE_ENV === "production";
-const LOGIN_PATTERN = /^[a-zA-Z0-9а-яА-ЯёЁ_.@-]{3,48}$/u;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const MAX_VAULT_JSON_BYTES = 8 * 1024 * 1024;
 
 if (process.env.TRUST_PROXY === "1") app.set("trust proxy", 1);
@@ -25,6 +25,11 @@ function nowIso() {
 
 function normalizeLogin(login) {
   return String(login || "").trim().toLowerCase();
+}
+
+function isValidEmail(login) {
+  const email = normalizeLogin(login);
+  return email.length <= 254 && EMAIL_PATTERN.test(email);
 }
 
 function publicUser(row) {
@@ -98,8 +103,8 @@ function isStrongPassword(password) {
 
 function validateLoginAndPassword(login, password) {
   const normalizedLogin = normalizeLogin(login);
-  if (!LOGIN_PATTERN.test(normalizedLogin)) {
-    return { error: "Логин должен содержать 3–48 символов: буквы, цифры, точку, подчёркивание, @ или дефис." };
+  if (!isValidEmail(normalizedLogin)) {
+    return { error: "Введите корректную электронную почту. Она будет уникальным логином аккаунта." };
   }
   if (!isStrongPassword(password)) {
     return { error: "Пароль должен содержать минимум 8 символов, буквы и цифры." };
@@ -184,6 +189,19 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, storage: "sqlite", encryptedVaults: true });
 });
 
+app.get("/api/auth/check", (req, res) => {
+  const email = normalizeLogin(req.query.email);
+  if (!isValidEmail(email)) {
+    res.status(400).json({
+      code: "INVALID_EMAIL",
+      message: "Введите корректную электронную почту."
+    });
+    return;
+  }
+  const existing = db.prepare("SELECT id FROM users WHERE login = ?").get(email);
+  res.json({ email, available: !existing });
+});
+
 app.get("/api/session", (req, res) => {
   const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
   if (!token) {
@@ -219,7 +237,7 @@ app.post("/api/auth/register", (req, res) => {
   }
   const existing = db.prepare("SELECT id FROM users WHERE login = ?").get(credentials.login);
   if (existing) {
-    res.status(409).json({ code: "LOGIN_EXISTS", message: "Аккаунт с таким логином уже существует." });
+    res.status(409).json({ code: "EMAIL_EXISTS", message: "Аккаунт с такой почтой уже существует. Войдите или используйте другую почту." });
     return;
   }
 
@@ -245,7 +263,16 @@ app.post("/api/auth/register", (req, res) => {
     return db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
   });
 
-  const user = createAccount();
+  let user;
+  try {
+    user = createAccount();
+  } catch (error) {
+    if (error.code === "SQLITE_CONSTRAINT_UNIQUE" || String(error.message || "").includes("UNIQUE constraint failed")) {
+      res.status(409).json({ code: "EMAIL_EXISTS", message: "Аккаунт с такой почтой уже существует. Войдите или используйте другую почту." });
+      return;
+    }
+    throw error;
+  }
   createSession(res, user.id);
   respondAuthPayload(res, user);
 });
@@ -253,9 +280,13 @@ app.post("/api/auth/register", (req, res) => {
 app.post("/api/auth/login", (req, res) => {
   const { login, password } = req.body || {};
   const normalizedLogin = normalizeLogin(login);
+  if (!isValidEmail(normalizedLogin)) {
+    res.status(400).json({ code: "INVALID_EMAIL", message: "Введите корректную электронную почту." });
+    return;
+  }
   const user = db.prepare("SELECT * FROM users WHERE login = ?").get(normalizedLogin);
   if (!user || !verifyPassword(password, user.password_hash)) {
-    res.status(401).json({ code: "BAD_LOGIN", message: "Неверный логин или пароль." });
+    res.status(401).json({ code: "BAD_LOGIN", message: "Неверная почта или пароль." });
     return;
   }
   db.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(nowIso());

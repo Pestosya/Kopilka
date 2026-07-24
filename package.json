@@ -7,9 +7,7 @@
     "start": "node server/index.js",
     "dev": "node server/index.js",
     "test": "node --test",
-    "check": "node --check app.js && node --check server/index.js && node --check server/storage.js && node --test",
-    "build": "node scripts/build.mjs",
-    "ci": "npm run check && npm run build"
+    "check": "node --check app.js && node --check server/index.js && node --check server/storage.js && node --test"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",

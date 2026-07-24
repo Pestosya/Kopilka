@@ -112,6 +112,17 @@ body {
 .onboarding-privacy b,.onboarding-privacy small { display:block; font-size:9px; }
 .onboarding-privacy small { margin-top:3px; color:var(--muted); line-height:1.45; }
 .onboarding-close { margin-bottom:20px; padding:8px 0; border:0; color:var(--purple); background:transparent; font-size:10px; font-weight:800; }
+.registration-dialog[hidden] { display:none; }
+.registration-dialog { position:fixed; inset:0; z-index:540; display:grid; place-items:center; padding:24px; background:rgba(29,25,48,.42); backdrop-filter:blur(16px); }
+.registration-card { position:relative; width:min(460px,100%); max-height:calc(100dvh - 48px); overflow:auto; padding:28px; border:1px solid var(--line); border-radius:28px; background:color-mix(in srgb,var(--surface-solid) 97%,transparent); box-shadow:0 32px 90px rgba(38,29,70,.25); }
+.registration-card h2 { margin:8px 0 0; font-size:32px; letter-spacing:-.05em; }
+.registration-card p { margin:10px 0 22px; color:var(--muted); font-size:11px; line-height:1.6; }
+.registration-card label { display:grid; gap:7px; margin-top:13px; color:var(--muted); font-size:10px; font-weight:700; }
+.registration-card input { height:48px; }
+.registration-note { display:block; min-height:16px; margin-top:10px; color:var(--muted); font-size:8px; line-height:1.45; text-align:center; }
+.registration-card .button.primary { margin-top:16px; }
+.registration-card .button.secondary { margin-top:9px; }
+.registration-close { position:absolute; top:14px; right:14px; display:grid; place-items:center; width:34px; height:34px; border:0; border-radius:12px; color:var(--muted); background:var(--surface-soft); font-size:18px; }
 .mobile-settings { display:none; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
@@ -793,26 +804,77 @@ body {
 
 .nav-link {
   min-height: 44px;
-  padding: 10px 12px;
+  position: relative;
+  gap: 10px;
+  padding: 8px 10px 8px 8px;
   border-radius: var(--radius);
+  color: #66737d;
   font-size: 14px;
   font-weight: 700;
+  transition: color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s ease;
 }
 
-.nav-link span {
-  width: 24px;
-  color: color-mix(in srgb, var(--muted) 74%, var(--text));
-  font-size: 18px;
+.nav-link .nav-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  position: relative;
+  width: 32px;
+  height: 32px;
+  border: 1px solid #dfe7ea;
+  border-radius: var(--radius);
+  color: #53616b;
+  background: linear-gradient(180deg, #fff, #f5f8f9);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.9), 0 1px 2px rgba(25,36,45,.04);
+  transition: color .18s ease, background .18s ease, border-color .18s ease, box-shadow .18s ease, transform .18s ease;
+}
+
+.nav-link .nav-icon svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .nav-link:hover {
-  background: var(--surface-soft);
+  color: #18232c;
+  background: #f3f6f7;
+  box-shadow: inset 0 0 0 1px rgba(24,35,44,.03);
+}
+
+.nav-link:hover .nav-icon {
+  color: #18232c;
+  border-color: #cfd9dd;
+  background: linear-gradient(180deg, #fff, #eef3f5);
+  transform: translateY(-1px);
 }
 
 .nav-link.active {
-  color: var(--purple-dark);
-  background: var(--purple-soft);
-  box-shadow: inset 3px 0 0 var(--purple);
+  color: #111820;
+  background: linear-gradient(90deg, #f3f6f7, rgba(255,255,255,.78));
+  box-shadow: inset 3px 0 0 #171f27, 0 8px 18px rgba(24,35,44,.07);
+}
+
+.nav-link.active .nav-icon {
+  color: #fff;
+  border-color: #171f27;
+  background: linear-gradient(145deg, #111820, #2f3a44);
+  box-shadow: 0 9px 18px rgba(17,24,32,.2);
+}
+
+.nav-link.active .nav-icon::after {
+  content: "";
+  position: absolute;
+  right: -3px;
+  top: -3px;
+  width: 8px;
+  height: 8px;
+  border: 2px solid var(--surface-solid);
+  border-radius: 50%;
+  background: var(--purple);
 }
 
 .side-goal {
@@ -1234,6 +1296,9 @@ select {
   .onboarding-panel { display:block; padding:28px 22px 38px; }
   .onboarding-form h2 { font-size:29px; }
   .onboarding-fields { grid-template-columns:1fr 1fr; }
+  .registration-dialog { align-items:start; padding:calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom)); }
+  .registration-card { max-height:calc(100dvh - 28px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); padding:24px 20px; border-radius:24px; }
+  .registration-card h2 { font-size:28px; }
   body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
   .app-shell { display: block; }
   .sidebar { display: none; }

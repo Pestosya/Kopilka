@@ -7,18 +7,54 @@
     return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
   }
 
+  const ANALYTICS_OPERATION_TYPES = new Set(["income", "expense", "fee"]);
+
+  function operationBalanceImpact(operation) {
+    const amount = Number(operation?.amount || 0);
+    if (operation?.type === "income" || operation?.type === "initial_balance") return amount;
+    if (operation?.type === "expense" || operation?.type === "fee") return -Math.abs(amount);
+    if (operation?.type === "balance_adjustment") return amount;
+    return 0;
+  }
+
+  function operationAffectsAnalytics(operation) {
+    return ANALYTICS_OPERATION_TYPES.has(operation?.type);
+  }
+
+  function transferFee(transfer) {
+    return Math.max(0, Number(transfer?.fee || 0));
+  }
+
   function calculateAccountBalance(account, operations = [], transfers = []) {
     if (!account) return 0;
     const operationsTotal = operations.reduce((sum, operation) => {
       if (operation.accountId !== account.id) return sum;
-      return sum + (operation.type === "income" ? 1 : -1) * Number(operation.amount || 0);
+      return sum + operationBalanceImpact(operation);
     }, 0);
     const transfersTotal = transfers.reduce((sum, transfer) => {
       if (transfer.toAccountId === account.id) return sum + Number(transfer.amount || 0);
-      if (transfer.fromAccountId === account.id) return sum - Number(transfer.amount || 0);
+      if (transfer.fromAccountId === account.id) return sum - Number(transfer.amount || 0) - transferFee(transfer);
       return sum;
     }, 0);
-    return roundMoney(Number(account.openingBalance || 0) + operationsTotal + transfersTotal);
+    return roundMoney(operationsTotal + transfersTotal);
+  }
+
+  function accountIncludedInTotal(account) {
+    return Boolean(account) && account.isArchived !== true && account.includeInTotal !== false;
+  }
+
+  function calculateAccountsTotal(accounts = [], operations = [], transfers = []) {
+    return roundMoney((accounts || []).reduce((sum, account) => {
+      if (!accountIncludedInTotal(account)) return sum;
+      return sum + calculateAccountBalance(account, operations, transfers);
+    }, 0));
+  }
+
+  function calculateTransferFeesTotal(transfers = [], predicate = () => true) {
+    return roundMoney((transfers || []).reduce((sum, transfer) => {
+      if (!predicate(transfer)) return sum;
+      return sum + transferFee(transfer);
+    }, 0));
   }
 
   function recurringMonthlyAmount(item) {
@@ -113,7 +149,12 @@
 
   return {
     roundMoney,
+    operationBalanceImpact,
+    operationAffectsAnalytics,
+    transferFee,
     calculateAccountBalance,
+    calculateAccountsTotal,
+    calculateTransferFeesTotal,
     recurringMonthlyAmount,
     annuityPayment,
     simulateDebtStrategy

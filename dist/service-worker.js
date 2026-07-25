@@ -1,8 +1,7 @@
-const CACHE = "kopilka-27e9a83e4e23";
+const CACHE = "kopilka-19486157cf68";
 const ASSETS = [
-  "./", "./index.html", "./styles.css", "./app.js", "./manifest.webmanifest",
-  "./sync-config.js",
-  "./modules/migrations.js", "./modules/finance.js", "./modules/security.js", "./modules/sync.js",
+  "./", "./index.html", "./styles.css?v=36", "./app.js?v=37", "./manifest.webmanifest",
+  "./modules/migrations.js", "./modules/finance.js", "./modules/security.js",
   "./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"
 ];
 
@@ -21,23 +20,17 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
-  // Внешние запросы (Supabase Auth/REST) не кэшируем и не перехватываем.
-  if (url.origin !== self.location.origin) return;
-  if (event.request.mode === "navigate") {
-    event.respondWith(
-      fetch(event.request).catch(() => caches.match("./index.html"))
-    );
+  if (url.pathname.startsWith("/api/")) {
+    event.respondWith(fetch(event.request, { cache: "no-store" }));
     return;
   }
-
-  // Быстрый ответ из кэша с фоновым обновлением статических ресурсов.
-  event.respondWith(caches.match(event.request).then(cached => {
-    const network = fetch(event.request).then(response => {
-      if (response.ok) caches.open(CACHE).then(cache => cache.put(event.request, response.clone()));
+  event.respondWith(
+    caches.match(event.request).then(cached => cached || fetch(event.request).then(response => {
+      const copy = response.clone();
+      caches.open(CACHE).then(cache => cache.put(event.request, copy));
       return response;
-    });
-    return cached || network;
-  }));
+    }).catch(() => caches.match("./index.html")))
+  );
 });
 
 self.addEventListener("notificationclick", event => {

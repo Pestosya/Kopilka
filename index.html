@@ -618,6 +618,7 @@
           <label>Со счёта<select id="transferFrom" required></select></label>
           <label>На счёт<select id="transferTo" required></select></label>
           <label>Сумма<input id="transferAmount" type="number" min="0.01" step="0.01" required></label>
+          <label>Комиссия<input id="transferFee" type="number" min="0" step="0.01" value="0"></label>
           <label>Дата<input id="transferDate" type="date" required></label>
           <label class="form-wide">Комментарий<input id="transferNote" placeholder="Необязательно"></label>
         </div>
@@ -657,6 +658,6 @@
   <script src="modules/migrations.js"></script>
   <script src="modules/finance.js"></script>
   <script src="modules/security.js"></script>
-  <script src="app.js?v=35"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>

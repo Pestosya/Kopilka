@@ -8,7 +8,15 @@ const API_BASE = "";
 const AUTH_MODE_LOGIN = "login";
 const AUTH_MODE_REGISTER = "register";
 const { CURRENT_SCHEMA_VERSION, migrateData } = KopilkaMigrations;
-const { roundMoney, calculateAccountBalance, simulateDebtStrategy } = KopilkaFinance;
+const {
+  roundMoney,
+  operationAffectsAnalytics,
+  transferFee,
+  calculateAccountBalance,
+  calculateAccountsTotal,
+  calculateTransferFeesTotal,
+  simulateDebtStrategy
+} = KopilkaFinance;
 const {
   randomBytes,
   bytesToBase64,
@@ -55,11 +63,21 @@ const DEFAULT_STATE = {
   },
   accounts: [{
     id: "account-main",
-    name: "Основная карта",
-    type: "card",
-    openingBalance: 0,
-    createdAt: ""
+    name: "Основной счёт",
+    type: "current",
+    bankName: "",
+    currency: "₽",
+    includeInTotal: true,
+    includeInSafetyFund: false,
+    allowNegativeBalance: false,
+    hideBalance: false,
+    isArchived: false,
+    color: "",
+    icon: "",
+    createdAt: "",
+    updatedAt: ""
   }],
+  cards: [],
   transfers: [],
   recurring: [],
   operations: [],
@@ -205,6 +223,12 @@ function isValidEmail(value) {
   return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
 }
 
+const ACCOUNT_TYPES = ["current", "savings", "deposit", "cash", "wallet", "credit", "investment", "other"];
+const LEGACY_ACCOUNT_TYPE_MAP = { card: "current" };
+const CARD_TYPES = ["debit", "credit"];
+const PAYMENT_SYSTEMS = ["mir", "visa", "mastercard", "unionpay", "other"];
+const TRANSACTION_TYPES = ["income", "expense", "transfer", "initial_balance", "balance_adjustment", "fee"];
+
 function emailDisplayName(email) {
   return normalizeEmail(email).split("@")[0] || "Пользователь";
 }
@@ -241,14 +265,102 @@ function normalizeDebtRecord(item) {
   };
 }
 
+function normalizeAccountType(type) {
+  const mapped = LEGACY_ACCOUNT_TYPE_MAP[type] || type;
+  return ACCOUNT_TYPES.includes(mapped) ? mapped : "current";
+}
+
+function normalizeTransactionType(type) {
+  return TRANSACTION_TYPES.includes(type) ? type : (type === "income" ? "income" : "expense");
+}
+
+function initialBalanceOperationId(accountId) {
+  return `initial-balance:${accountId}`;
+}
+
+function explicitLastFourDigits(item) {
+  const value = item?.lastFourDigits ?? item?.last4 ?? item?.cardLastFour ?? "";
+  return /^[0-9]{4}$/.test(String(value)) ? String(value) : "";
+}
+
+function normalizePaymentSystem(value) {
+  return PAYMENT_SYSTEMS.includes(value) ? value : "other";
+}
+
+function normalizeCardType(value) {
+  return CARD_TYPES.includes(value) ? value : "debit";
+}
+
 function normalizeAccount(item, index = 0) {
-  const allowedTypes = ["card", "cash", "savings"];
+  const type = normalizeAccountType(item?.type);
   return {
     id: item?.id || `account-${index + 1}-${uid()}`,
-    name: String(item?.name || (index === 0 ? "Основная карта" : "Счёт")),
-    type: allowedTypes.includes(item?.type) ? item.type : "card",
-    openingBalance: Number(item?.openingBalance ?? item?.balance ?? 0),
-    createdAt: item?.createdAt || isoToday()
+    name: String(item?.name || (index === 0 ? "Основной счёт" : "Счёт")),
+    type,
+    bankName: item?.bankName || item?.bank || "",
+    currency: item?.currency || "₽",
+    includeInTotal: item?.includeInTotal !== false,
+    includeInSafetyFund: item?.includeInSafetyFund === true,
+    allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit",
+    hideBalance: item?.hideBalance === true,
+    isArchived: item?.isArchived === true,
+    color: item?.color || "",
+    icon: item?.icon || "",
+    createdAt: item?.createdAt || isoToday(),
+    updatedAt: item?.updatedAt || item?.createdAt || isoToday()
+  };
+}
+
+function normalizeCard(item, index = 0) {
+  const lastFourDigits = explicitLastFourDigits(item);
+  return {
+    id: item?.id || `card-${index + 1}-${uid()}`,
+    accountId: item?.accountId || "",
+    name: item?.name || "Карта",
+    lastFourDigits,
+    paymentSystem: normalizePaymentSystem(item?.paymentSystem),
+    cardType: normalizeCardType(item?.cardType),
+    isVirtual: item?.isVirtual === true,
+    expirationDate: item?.expirationDate || "",
+    creditLimit: Math.max(0, Number(item?.creditLimit || 0)),
+    isPrimary: item?.isPrimary !== false,
+    isArchived: item?.isArchived === true,
+    color: item?.color || "",
+    isLegacy: item?.isLegacy === true,
+    isMigrated: item?.isMigrated === true,
+    numberMissing: item?.numberMissing === true || !lastFourDigits,
+    createdAt: item?.createdAt || isoToday(),
+    updatedAt: item?.updatedAt || item?.createdAt || isoToday()
+  };
+}
+
+function normalizeOperationRecord(item, fallbackAccountId = "") {
+  const type = normalizeTransactionType(item?.type);
+  return {
+    ...item,
+    id: item?.id || uid(),
+    type,
+    amount: Number(item?.amount || 0),
+    category: item?.category || (type === "initial_balance" ? "Начальный остаток" : "Другое"),
+    accountId: item?.accountId || fallbackAccountId,
+    cardId: item?.cardId || "",
+    description: item?.description || item?.note || "",
+    note: item?.note || item?.description || "",
+    date: item?.date || isoToday(),
+    createdAt: item?.createdAt || item?.date || isoToday()
+  };
+}
+
+function normalizeTransferRecord(item) {
+  return {
+    id: item?.id || uid(),
+    fromAccountId: item?.fromAccountId || item?.from,
+    toAccountId: item?.toAccountId || item?.to,
+    amount: Number(item?.amount || 0),
+    fee: Math.max(0, Number(item?.fee || 0)),
+    date: item?.date || isoToday(),
+    note: item?.note || item?.comment || "",
+    comment: item?.comment || item?.note || ""
   };
 }
 
@@ -286,48 +398,50 @@ function normalizeRecurringRecord(item, fallbackAccountId) {
 
 function hydrateState(data = {}) {
   const settings = { ...DEFAULT_STATE.settings, ...(data.settings || {}) };
-  const operations = (Array.isArray(data.operations) ? data.operations : []).map(item => ({
-    ...item,
-    id: item.id || uid(),
-    type: item.type === "income" ? "income" : "expense",
-    amount: Number(item.amount || 0),
-    category: item.category || "Другое",
-    date: item.date || isoToday(),
-    note: item.note || ""
-  }));
   const savedAccounts = Array.isArray(data.accounts) ? data.accounts : [];
   let accounts;
 
   if (savedAccounts.length) {
-    accounts = savedAccounts.map(normalizeAccount);
+    accounts = savedAccounts.map((item, index) => ({
+      ...normalizeAccount(item, index),
+      currency: item?.currency || settings.currency || "₽"
+    }));
   } else {
-    const legacyNames = [...new Set(operations.map(item => String(item.account || "").trim()).filter(Boolean))];
+    const rawOperations = Array.isArray(data.operations) ? data.operations : [];
+    const legacyNames = [...new Set(rawOperations.map(item => String(item.account || "").trim()).filter(Boolean))];
     accounts = (legacyNames.length ? legacyNames : ["Основная карта"]).map((name, index) => normalizeAccount({
       id: index === 0 ? "account-main" : "",
       name,
-      type: index === 0 ? "card" : "cash",
-      openingBalance: index === 0 ? Number(settings.openingBalance || 0) : 0
+      type: index === 0 ? "current" : "cash",
+      currency: settings.currency || "₽"
     }, index));
   }
 
   const accountIds = new Set(accounts.map(account => account.id));
+  const cards = (Array.isArray(data.cards) ? data.cards : [])
+    .map(normalizeCard)
+    .filter(card => accountIds.has(card.accountId));
+  const cardIds = new Set(cards.map(card => card.id));
+  const operations = (Array.isArray(data.operations) ? data.operations : [])
+    .map(item => normalizeOperationRecord(item, accounts[0]?.id || ""))
+    .map(operation => {
+      const byLegacyName = accounts.find(account => account.name === String(operation.account || "").trim());
+      operation.accountId = accountIds.has(operation.accountId)
+        ? operation.accountId
+        : (byLegacyName?.id || accounts[0].id);
+      const card = cards.find(item => item.id === operation.cardId);
+      if (!card || card.accountId !== operation.accountId) operation.cardId = "";
+      operation.account = accounts.find(account => account.id === operation.accountId)?.name || accounts[0].name;
+      return operation;
+    });
+
   operations.forEach(operation => {
-    const byLegacyName = accounts.find(account => account.name === String(operation.account || "").trim());
-    operation.accountId = accountIds.has(operation.accountId)
-      ? operation.accountId
-      : (byLegacyName?.id || accounts[0].id);
-    operation.account = accounts.find(account => account.id === operation.accountId)?.name || accounts[0].name;
+    if (operation.type === "initial_balance") operation.isInitialBalance = true;
+    if (operation.type === "balance_adjustment") operation.isBalanceAdjustment = true;
   });
 
   const transfers = (Array.isArray(data.transfers) ? data.transfers : [])
-    .map(item => ({
-      id: item.id || uid(),
-      fromAccountId: item.fromAccountId || item.from,
-      toAccountId: item.toAccountId || item.to,
-      amount: Number(item.amount || 0),
-      date: item.date || isoToday(),
-      note: item.note || ""
-    }))
+    .map(normalizeTransferRecord)
     .filter(item => item.amount > 0 && item.fromAccountId !== item.toAccountId
       && accountIds.has(item.fromAccountId) && accountIds.has(item.toAccountId));
   const recurring = (Array.isArray(data.recurring) ? data.recurring : [])
@@ -335,7 +449,9 @@ function hydrateState(data = {}) {
     .map(item => ({ ...item, accountId: accountIds.has(item.accountId) ? item.accountId : accounts[0].id }))
     .filter(item => item.amount > 0);
 
-  settings.openingBalance = Number(accounts[0]?.openingBalance || 0);
+  settings.openingBalance = Number(operations.find(item =>
+    item.accountId === accounts[0]?.id && item.type === "initial_balance"
+  )?.amount || 0);
   if (data.settings?.profileCreated === undefined) {
     settings.profileCreated = Boolean(settings.login || settings.name || operations.length || (data.debts || []).length);
   }
@@ -346,6 +462,7 @@ function hydrateState(data = {}) {
     settings,
     categories: { ...DEFAULT_STATE.categories, ...(data.categories || {}) },
     accounts,
+    cards,
     transfers,
     recurring,
     operations,
@@ -977,11 +1094,47 @@ function accountName(id) {
 }
 
 function accountTypeName(type) {
-  return type === "cash" ? "Наличные" : type === "savings" ? "Накопительный счёт" : "Банковская карта";
+  return {
+    current: "Текущий счёт",
+    savings: "Накопительный счёт",
+    deposit: "Вклад",
+    cash: "Наличные",
+    wallet: "Электронный кошелёк",
+    credit: "Кредитный счёт",
+    investment: "Инвестиционный счёт",
+    other: "Другой счёт",
+    card: "Банковская карта"
+  }[type] || "Текущий счёт";
 }
 
 function accountIcon(type) {
-  return type === "cash" ? "₽" : type === "savings" ? "◇" : "▣";
+  if (type === "cash") return "₽";
+  if (type === "savings" || type === "deposit") return "◇";
+  if (type === "wallet") return "◉";
+  if (type === "credit") return "−";
+  return "▣";
+}
+
+function accountVisualClass(type) {
+  if (type === "cash") return "cash";
+  if (type === "savings" || type === "deposit") return "savings";
+  return "card";
+}
+
+function activeAccounts() {
+  return state.accounts.filter(account => account.isArchived !== true);
+}
+
+function cardsForAccount(accountId, includeArchived = false) {
+  return state.cards.filter(card =>
+    card.accountId === accountId && (includeArchived || card.isArchived !== true)
+  );
+}
+
+function cardDisplayName(card) {
+  if (!card) return "";
+  const digits = card.lastFourDigits ? `•••• ${card.lastFourDigits}` : "Карта без номера";
+  return card.name && card.name !== "Карта" ? `${card.name} · ${digits}` : digits;
 }
 
 function accountBalance(id) {
@@ -990,7 +1143,49 @@ function accountBalance(id) {
 }
 
 function totalAccountsBalance() {
-  return roundMoney(state.accounts.reduce((sum, account) => sum + accountBalance(account.id), 0));
+  return calculateAccountsTotal(state.accounts, state.operations, state.transfers);
+}
+
+function initialBalanceOperation(accountId) {
+  return state.operations.find(operation =>
+    operation.id === initialBalanceOperationId(accountId)
+    || (operation.accountId === accountId && operation.type === "initial_balance")
+  );
+}
+
+function initialBalanceAmount(accountId) {
+  return Number(initialBalanceOperation(accountId)?.amount || 0);
+}
+
+function upsertInitialBalanceOperation(accountId, amount, date = isoToday()) {
+  const account = accountById(accountId);
+  if (!account) return;
+  const operation = {
+    id: initialBalanceOperationId(accountId),
+    accountId,
+    cardId: "",
+    type: "initial_balance",
+    amount: Number(amount || 0),
+    category: "Начальный остаток",
+    description: "Начальный остаток счёта",
+    note: "Начальный остаток счёта",
+    date,
+    isInitialBalance: true,
+    createdAt: date
+  };
+  const existingIndex = state.operations.findIndex(item =>
+    item.id === operation.id || (item.accountId === accountId && item.type === "initial_balance")
+  );
+  if (existingIndex >= 0) {
+    state.operations[existingIndex] = {
+      ...state.operations[existingIndex],
+      ...operation,
+      id: state.operations[existingIndex].id || operation.id,
+      createdAt: state.operations[existingIndex].createdAt || operation.createdAt
+    };
+  } else {
+    state.operations.push(operation);
+  }
 }
 
 function daysUntil(value) {
@@ -1092,12 +1287,14 @@ function totals() {
   let expenseCount = 0;
 
   state.operations.forEach(operation => {
+    if (!operationAffectsAnalytics(operation)) return;
     const amount = Number(operation.amount || 0);
-    const sign = operation.type === "income" ? 1 : -1;
+    const isIncome = operation.type === "income";
+    const sign = isIncome ? 1 : -1;
     if (operation.type === "income") allIncome += amount;
     else allExpense += amount;
     if (String(operation.date).slice(0, 7) === currentMonth) {
-      if (operation.type === "income") {
+      if (isIncome) {
         monthIncome += amount;
         incomeCount += 1;
       } else {
@@ -1106,6 +1303,17 @@ function totals() {
       }
     }
     if (String(operation.date).slice(0, 7) === previousMonth) previousNet += sign * amount;
+  });
+
+  state.transfers.forEach(transfer => {
+    const fee = transferFee(transfer);
+    if (fee <= 0) return;
+    allExpense += fee;
+    if (String(transfer.date).slice(0, 7) === currentMonth) {
+      monthExpense += fee;
+      expenseCount += 1;
+    }
+    if (String(transfer.date).slice(0, 7) === previousMonth) previousNet -= fee;
   });
 
   const debtTotal = state.debts.reduce((sum, debt) => sum + Number(debt.balance || 0), 0);
@@ -1139,7 +1347,35 @@ function getHealthScore(summary) {
 }
 
 function visualFor(category, type) {
+  if (type === "initial_balance") return ["＋", "sky"];
+  if (type === "balance_adjustment") return ["≈", "lilac"];
+  if (type === "fee") return ["−", "coral"];
   return categoryVisuals[category] || [type === "income" ? "↗" : "↘", type === "income" ? "mint" : "coral"];
+}
+
+function operationTypeLabel(type) {
+  return {
+    income: "Доход",
+    expense: "Расход",
+    fee: "Комиссия",
+    initial_balance: "Начальный остаток",
+    balance_adjustment: "Корректировка",
+    transfer: "Перевод"
+  }[type] || "Операция";
+}
+
+function operationAmountPrefix(type, amount) {
+  if (type === "income" || type === "initial_balance") return Number(amount || 0) >= 0 ? "+" : "";
+  if (type === "expense" || type === "fee") return "−";
+  if (type === "balance_adjustment") return Number(amount || 0) >= 0 ? "+" : "";
+  return "";
+}
+
+function operationAmountClass(type, amount) {
+  if (type === "income") return "income";
+  if (type === "expense" || type === "fee") return "expense";
+  if (type === "balance_adjustment" && Number(amount || 0) < 0) return "expense";
+  return "";
 }
 
 function renderDashboard() {
@@ -1205,10 +1441,12 @@ function renderRecentTransactions() {
   }
   target.innerHTML = operations.map(operation => {
     const [icon, color] = visualFor(operation.category, operation.type);
+    const amountClass = operationAmountClass(operation.type, operation.amount);
+    const amount = Math.abs(Number(operation.amount || 0));
     return `<div class="transaction-item">
       <span class="stat-icon ${color}">${icon}</span>
       <div class="transaction-copy"><b>${escapeHtml(operation.category)}</b><small>${escapeHtml(operation.note || accountName(operation.accountId))} · ${escapeHtml(accountName(operation.accountId))} · ${formatDate(operation.date, true)}</small></div>
-      <strong class="transaction-amount ${operation.type} sensitive">${operation.type === "income" ? "+" : "−"} ${money(operation.amount)}</strong>
+      <strong class="transaction-amount ${amountClass} sensitive">${operationAmountPrefix(operation.type, operation.amount)} ${money(amount)}</strong>
     </div>`;
   }).join("");
 }
@@ -1264,26 +1502,39 @@ function renderOperations() {
   }
   target.innerHTML = operations.map(operation => {
     const [icon, color] = visualFor(operation.category, operation.type);
+    const amountClass = operationAmountClass(operation.type, operation.amount);
+    const amount = Math.abs(Number(operation.amount || 0));
+    const actions = operation.type === "income" || operation.type === "expense"
+      ? `<button class="row-menu" data-edit-operation="${operation.id}" aria-label="Изменить">✎</button><button class="row-menu" data-delete-operation="${operation.id}" aria-label="Удалить">×</button>`
+      : "";
     return `<tr>
-      <td><div class="row-title"><span class="stat-icon ${color}">${icon}</span><div><b>${escapeHtml(operation.note || operation.category)}</b><small>${operation.type === "income" ? "Доход" : "Расход"}</small></div></div></td>
+      <td><div class="row-title"><span class="stat-icon ${color}">${icon}</span><div><b>${escapeHtml(operation.note || operation.category)}</b><small>${operationTypeLabel(operation.type)}</small></div></div></td>
       <td>${escapeHtml(operation.category)}</td>
       <td>${formatDate(operation.date, true)}</td>
       <td>${escapeHtml(accountName(operation.accountId))}</td>
-      <td class="${operation.type === "income" ? "amount-income" : "amount-expense"} sensitive">${operation.type === "income" ? "+" : "−"} ${money(operation.amount)}</td>
-      <td><button class="row-menu" data-edit-operation="${operation.id}" aria-label="Изменить">✎</button><button class="row-menu" data-delete-operation="${operation.id}" aria-label="Удалить">×</button></td>
+      <td class="${amountClass === "income" ? "amount-income" : amountClass === "expense" ? "amount-expense" : ""} sensitive">${operationAmountPrefix(operation.type, operation.amount)} ${money(amount)}</td>
+      <td>${actions}</td>
     </tr>`;
   }).join("");
 }
 
 function renderAccounts() {
-  const accountCount = state.accounts.length;
+  const accounts = activeAccounts();
+  const accountCount = accounts.length;
+  const cardCount = state.cards.filter(card => card.isArchived !== true).length;
   document.querySelector("#accountsTotal").textContent = money(totalAccountsBalance());
   document.querySelector("#accountsCount").textContent =
-    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])}`;
-  document.querySelector("#accountCards").innerHTML = state.accounts.map(account => {
+    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])}${cardCount ? ` · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}` : ""}`;
+  document.querySelector("#accountCards").innerHTML = accounts.map(account => {
     const balance = accountBalance(account.id);
-    const operationCount = state.operations.filter(operation => operation.accountId === account.id).length;
-    return `<article class="account-card ${account.type}">
+    const accountCards = cardsForAccount(account.id);
+    const cardLabel = accountCards.length
+      ? accountCards.map(cardDisplayName).join(" · ")
+      : accountTypeName(account.type);
+    const operationCount = state.operations.filter(operation =>
+      operation.accountId === account.id && operation.type !== "initial_balance"
+    ).length;
+    return `<article class="account-card ${accountVisualClass(account.type)}">
       <div class="account-card-head">
         <span class="account-card-icon">${accountIcon(account.type)}</span>
         <div>
@@ -1293,7 +1544,7 @@ function renderAccounts() {
       </div>
       <div class="account-card-name">${escapeHtml(account.name)}</div>
       <strong class="account-card-balance sensitive">${money(balance)}</strong>
-      <div class="account-card-foot"><span>${accountTypeName(account.type)}</span><span>${operationCount} ${plural(operationCount, ["операция", "операции", "операций"])}</span></div>
+      <div class="account-card-foot"><span>${escapeHtml(cardLabel)}</span><span>${operationCount} ${plural(operationCount, ["операция", "операции", "операций"])}</span></div>
     </article>`;
   }).join("");
 
@@ -1305,7 +1556,7 @@ function renderAccounts() {
         <span class="transfer-icon">⇄</span>
         <div class="transfer-copy">
           <b>${escapeHtml(accountName(transfer.fromAccountId))} → ${escapeHtml(accountName(transfer.toAccountId))}</b>
-          <small>${formatDate(transfer.date, true)}${transfer.note ? ` · ${escapeHtml(transfer.note)}` : ""}</small>
+          <small>${formatDate(transfer.date, true)}${transferFee(transfer) ? ` · комиссия ${money(transferFee(transfer))}` : ""}${transfer.note ? ` · ${escapeHtml(transfer.note)}` : ""}</small>
         </div>
         <strong class="sensitive">${money(transfer.amount)}</strong>
         <button class="row-menu" data-delete-transfer="${transfer.id}" aria-label="Удалить перевод">×</button>
@@ -1602,19 +1853,31 @@ function monthBuckets() {
     });
   }
   state.operations.forEach(operation => {
+    if (!operationAffectsAnalytics(operation)) return;
     const bucket = months.find(month => month.key === String(operation.date).slice(0, 7));
-    if (bucket) bucket[operation.type] += Number(operation.amount || 0);
+    if (!bucket) return;
+    if (operation.type === "income") bucket.income += Number(operation.amount || 0);
+    else bucket.expense += Math.abs(Number(operation.amount || 0));
+  });
+  state.transfers.forEach(transfer => {
+    const fee = transferFee(transfer);
+    if (fee <= 0) return;
+    const bucket = months.find(month => month.key === String(transfer.date).slice(0, 7));
+    if (bucket) bucket.expense += fee;
   });
   return months;
 }
 
 function monthOperationTotals(key, predicate = () => true) {
-  return state.operations
-    .filter(operation => String(operation.date).slice(0, 7) === key && predicate(operation))
+  const totals = state.operations
+    .filter(operation => operationAffectsAnalytics(operation) && String(operation.date).slice(0, 7) === key && predicate(operation))
     .reduce((result, operation) => {
-      result[operation.type] += Number(operation.amount || 0);
+      if (operation.type === "income") result.income += Number(operation.amount || 0);
+      else result.expense += Math.abs(Number(operation.amount || 0));
       return result;
     }, { income: 0, expense: 0 });
+  totals.expense += calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === key);
+  return totals;
 }
 
 function recurringAmountForMonth(item, key) {
@@ -1675,15 +1938,15 @@ function balanceForecast() {
 }
 
 function capitalHistory() {
-  const openingBalance = state.accounts.reduce((sum, account) => sum + Number(account.openingBalance || 0), 0);
   const points = [];
   for (let offset = -5; offset <= 0; offset += 1) {
     const date = shiftMonth(new Date(), offset);
     const key = monthKey(date);
-    const accountValue = openingBalance + state.operations
-      .filter(operation => String(operation.date).slice(0, 7) <= key)
-      .reduce((sum, operation) =>
-        sum + (operation.type === "income" ? 1 : -1) * Number(operation.amount || 0), 0);
+    const accountValue = calculateAccountsTotal(
+      state.accounts,
+      state.operations.filter(operation => String(operation.date).slice(0, 7) <= key),
+      state.transfers.filter(transfer => String(transfer.date).slice(0, 7) <= key)
+    );
     const debtValue = state.debts.reduce((sum, debt) => {
       const principalPaidLater = (debt.paymentHistory || [])
         .filter(payment => String(payment.date).slice(0, 7) > key)
@@ -1809,8 +2072,14 @@ function renderAnalytics() {
   const currentMonth = monthKey();
   const categories = {};
   state.operations
-    .filter(operation => operation.type === "expense" && String(operation.date).slice(0, 7) === currentMonth)
-    .forEach(operation => { categories[operation.category] = (categories[operation.category] || 0) + Number(operation.amount || 0); });
+    .filter(operation =>
+      operationAffectsAnalytics(operation)
+      && operation.type !== "income"
+      && String(operation.date).slice(0, 7) === currentMonth
+    )
+    .forEach(operation => { categories[operation.category] = (categories[operation.category] || 0) + Math.abs(Number(operation.amount || 0)); });
+  const transferFees = calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === currentMonth);
+  if (transferFees > 0) categories["Комиссии"] = (categories["Комиссии"] || 0) + transferFees;
   const entries = Object.entries(categories).sort((a, b) => b[1] - a[1]).slice(0, 7);
   const total = entries.reduce((sum, entry) => sum + entry[1], 0);
   const colors = ["#6c5ce7", "#ff735f", "#20b987", "#4d9de0", "#f7b731", "#a18cf2", "#ee8a78"];
@@ -1829,7 +2098,7 @@ function renderAnalytics() {
 function renderSettings() {
   document.querySelector("#userName").value = state.settings.name;
   document.querySelector("#userEmail").value = state.settings.email || "";
-  document.querySelector("#openingBalance").value = Number(state.accounts[0]?.openingBalance || 0);
+  document.querySelector("#openingBalance").value = initialBalanceAmount(state.accounts[0]?.id);
   document.querySelector("#reserveTarget").value = state.settings.reserveTarget;
   document.querySelector("#reserveSaved").value = state.settings.reserveSaved;
   document.querySelector("#currency").value = state.settings.currency;
@@ -2186,10 +2455,12 @@ function fillRecurringCategory(type, selected = "") {
 
 function fillAccountSelect(select, selectedId = "") {
   const current = selectedId || select.value || state.accounts[0]?.id || "";
-  select.innerHTML = state.accounts.map(account =>
+  const accounts = activeAccounts();
+  const options = accounts.length ? accounts : state.accounts;
+  select.innerHTML = options.map(account =>
     `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${money(accountBalance(account.id))}</option>`
   ).join("");
-  select.value = accountById(current) ? current : (state.accounts[0]?.id || "");
+  select.value = options.some(account => account.id === current) ? current : (options[0]?.id || "");
 }
 
 function fillAccountSelects() {
@@ -2268,9 +2539,11 @@ function openOperationModal(type, operation = null) {
 }
 
 function setAccountType(type) {
-  document.querySelector("#accountType").value = type;
+  const normalized = normalizeAccountType(type);
+  const pickerType = normalized === "current" ? "card" : normalized;
+  document.querySelector("#accountType").value = normalized;
   document.querySelectorAll("[data-account-type]").forEach(button => {
-    button.classList.toggle("active", button.dataset.accountType === type);
+    button.classList.toggle("active", button.dataset.accountType === pickerType);
   });
 }
 
@@ -2281,8 +2554,8 @@ function openAccountModal(account = null) {
   document.querySelector("#accountForm").hidden = false;
   document.querySelector("#accountId").value = account?.id || "";
   document.querySelector("#accountName").value = account?.name || "";
-  document.querySelector("#accountOpeningBalance").value = Number(account?.openingBalance || 0);
-  setAccountType(account?.type || "card");
+  document.querySelector("#accountOpeningBalance").value = Number(account ? initialBalanceAmount(account.id) : 0);
+  setAccountType(account?.type || "current");
   openModal();
   setTimeout(() => document.querySelector("#accountName").focus(), 100);
 }
@@ -2291,6 +2564,8 @@ function renderTransferPreview() {
   const fromId = document.querySelector("#transferFrom").value;
   const toId = document.querySelector("#transferTo").value;
   const amount = Number(document.querySelector("#transferAmount").value || 0);
+  const feeInput = document.querySelector("#transferFee");
+  const fee = feeInput ? Math.max(0, Number(feeInput.value || 0)) : 0;
   const preview = document.querySelector("#transferPreview");
   if (!fromId || !toId || fromId === toId) {
     preview.textContent = "Выберите два разных счёта";
@@ -2298,11 +2573,13 @@ function renderTransferPreview() {
   }
   const balance = accountBalance(fromId);
   preview.innerHTML = `Доступно на счёте «${escapeHtml(accountName(fromId))}»: <b class="sensitive">${money(balance)}</b>`
-    + (amount > balance ? `<br><span class="amount-expense">Не хватает ${money(amount - balance)}</span>` : "");
+    + (fee ? `<br>Комиссия: <b class="sensitive">${money(fee)}</b>` : "")
+    + (amount + fee > balance ? `<br><span class="amount-expense">Не хватает ${money(amount + fee - balance)}</span>` : "");
 }
 
 function openTransferModal() {
-  if (state.accounts.length < 2) {
+  const accounts = activeAccounts();
+  if (accounts.length < 2) {
     showToast("Для перевода добавьте второй счёт");
     openAccountModal();
     return;
@@ -2311,9 +2588,10 @@ function openTransferModal() {
   document.querySelector("#modalKicker").textContent = "МЕЖДУ СЧЕТАМИ";
   document.querySelector("#modalTitle").textContent = "Новый перевод";
   document.querySelector("#transferForm").hidden = false;
-  fillAccountSelect(document.querySelector("#transferFrom"), state.accounts[0].id);
-  fillAccountSelect(document.querySelector("#transferTo"), state.accounts[1].id);
+  fillAccountSelect(document.querySelector("#transferFrom"), accounts[0].id);
+  fillAccountSelect(document.querySelector("#transferTo"), accounts[1].id);
   document.querySelector("#transferAmount").value = "";
+  if (document.querySelector("#transferFee")) document.querySelector("#transferFee").value = 0;
   document.querySelector("#transferDate").value = isoToday();
   document.querySelector("#transferNote").value = "";
   renderTransferPreview();
@@ -2759,14 +3037,15 @@ document.addEventListener("click", event => {
     const id = deleteAccount.dataset.deleteAccount;
     const isUsed = state.operations.some(operation => operation.accountId === id)
       || state.recurring.some(item => item.accountId === id)
-      || state.transfers.some(transfer => transfer.fromAccountId === id || transfer.toAccountId === id);
+      || state.transfers.some(transfer => transfer.fromAccountId === id || transfer.toAccountId === id)
+      || state.cards.some(card => card.accountId === id);
     if (state.accounts.length === 1) {
       showToast("Нужен хотя бы один счёт");
     } else if (isUsed) {
       showToast("Счёт используется в операциях, переводах или расписании");
     } else if (confirm("Удалить этот счёт?")) {
       state.accounts = state.accounts.filter(account => account.id !== id);
-      state.settings.openingBalance = Number(state.accounts[0]?.openingBalance || 0);
+      state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
       saveState();
       renderAll();
       showToast("Счёт удалён");
@@ -2956,27 +3235,39 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
   event.preventDefault();
   const id = document.querySelector("#accountId").value || uid();
   const existing = accountById(id);
+  const initialBalance = Number(document.querySelector("#accountOpeningBalance").value || 0);
   const account = normalizeAccount({
     id,
     name: document.querySelector("#accountName").value.trim(),
     type: document.querySelector("#accountType").value,
-    openingBalance: Number(document.querySelector("#accountOpeningBalance").value || 0),
-    createdAt: existing?.createdAt || isoToday()
+    currency: existing?.currency || state.settings.currency || "₽",
+    bankName: existing?.bankName || "",
+    includeInTotal: existing?.includeInTotal !== false,
+    includeInSafetyFund: existing?.includeInSafetyFund === true,
+    allowNegativeBalance: existing?.allowNegativeBalance === true,
+    hideBalance: existing?.hideBalance === true,
+    isArchived: existing?.isArchived === true,
+    color: existing?.color || "",
+    icon: existing?.icon || "",
+    createdAt: existing?.createdAt || isoToday(),
+    updatedAt: isoToday()
   });
   const index = state.accounts.findIndex(item => item.id === id);
   if (index >= 0) state.accounts[index] = account;
   else state.accounts.push(account);
+  upsertInitialBalanceOperation(id, initialBalance, existing?.createdAt || account.createdAt || isoToday());
   state.operations.forEach(operation => {
     if (operation.accountId === id) operation.account = account.name;
   });
-  state.settings.openingBalance = Number(state.accounts[0]?.openingBalance || 0);
+  state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
   saveState();
   closeModal();
   renderAll();
   showToast(existing ? "Счёт обновлён" : "Счёт добавлен");
 });
 
-["transferFrom", "transferTo", "transferAmount"].forEach(id => {
+["transferFrom", "transferTo", "transferAmount", "transferFee"].forEach(id => {
+  if (!document.querySelector(`#${id}`)) return;
   document.querySelector(`#${id}`).addEventListener("input", renderTransferPreview);
   document.querySelector(`#${id}`).addEventListener("change", renderTransferPreview);
 });
@@ -2986,6 +3277,8 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
   const fromAccountId = document.querySelector("#transferFrom").value;
   const toAccountId = document.querySelector("#transferTo").value;
   const amount = Number(document.querySelector("#transferAmount").value || 0);
+  const feeInput = document.querySelector("#transferFee");
+  const fee = feeInput ? Math.max(0, Number(feeInput.value || 0)) : 0;
   if (fromAccountId === toAccountId) {
     showToast("Выберите два разных счёта");
     return;
@@ -2994,7 +3287,7 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     showToast("Введите сумму больше нуля");
     return;
   }
-  if (amount > accountBalance(fromAccountId)) {
+  if (amount + fee > accountBalance(fromAccountId)) {
     showToast("На счёте недостаточно денег");
     return;
   }
@@ -3003,8 +3296,10 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     fromAccountId,
     toAccountId,
     amount: roundMoney(amount),
+    fee: roundMoney(fee),
     date: document.querySelector("#transferDate").value,
-    note: document.querySelector("#transferNote").value.trim()
+    note: document.querySelector("#transferNote").value.trim(),
+    comment: document.querySelector("#transferNote").value.trim()
   });
   saveState();
   closeModal();
@@ -3288,7 +3583,7 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
   state.settings.email = document.querySelector("#userEmail").value.trim();
   state.settings.profileCreated = true;
   state.settings.openingBalance = Number(document.querySelector("#openingBalance").value || 0);
-  state.accounts[0].openingBalance = state.settings.openingBalance;
+  if (state.accounts[0]) upsertInitialBalanceOperation(state.accounts[0].id, state.settings.openingBalance, state.accounts[0].createdAt || isoToday());
   state.settings.reserveTarget = Number(document.querySelector("#reserveTarget").value || 0);
   state.settings.reserveSaved = Number(document.querySelector("#reserveSaved").value || 0);
   state.settings.currency = document.querySelector("#currency").value;

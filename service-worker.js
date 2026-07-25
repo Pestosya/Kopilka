@@ -1,6 +1,6 @@
 const CACHE = "kopilka-v36-premium-icons";
 const ASSETS = [
-  "./", "./index.html", "./styles.css?v=36", "./app.js?v=35", "./manifest.webmanifest",
+  "./", "./index.html", "./styles.css?v=36", "./app.js?v=37", "./manifest.webmanifest",
   "./modules/migrations.js", "./modules/finance.js", "./modules/security.js",
   "./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"
 ];

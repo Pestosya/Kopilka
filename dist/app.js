@@ -3,8 +3,20 @@ const LEGACY_KEY = "finance_cabinet_v1";
 const PROFILE_REGISTRY_KEY = "kopilka_profiles_v1";
 const ACTIVE_PROFILE_KEY = "kopilka_active_profile_v1";
 const PROFILE_STORAGE_PREFIX = "kopilka_profile_v1:";
+const LEGACY_LOCAL_KEYS = [STORAGE_KEY, LEGACY_KEY, PROFILE_REGISTRY_KEY, ACTIVE_PROFILE_KEY];
+const API_BASE = "";
+const AUTH_MODE_LOGIN = "login";
+const AUTH_MODE_REGISTER = "register";
 const { CURRENT_SCHEMA_VERSION, migrateData } = KopilkaMigrations;
-const { roundMoney, calculateAccountBalance, simulateDebtStrategy } = KopilkaFinance;
+const {
+  roundMoney,
+  operationAffectsAnalytics,
+  transferFee,
+  calculateAccountBalance,
+  calculateAccountsTotal,
+  calculateTransferFeesTotal,
+  simulateDebtStrategy
+} = KopilkaFinance;
 const {
   randomBytes,
   bytesToBase64,
@@ -19,7 +31,6 @@ const {
   decryptPayload,
   encryptWithRawKey,
   decryptWithRawKey,
-  deriveAuthKey,
   wrapVaultKey,
   unwrapVaultKey
 } = KopilkaSecurity;
@@ -52,11 +63,21 @@ const DEFAULT_STATE = {
   },
   accounts: [{
     id: "account-main",
-    name: "Основная карта",
-    type: "card",
-    openingBalance: 0,
-    createdAt: ""
+    name: "Основной счёт",
+    type: "current",
+    bankName: "",
+    currency: "₽",
+    includeInTotal: true,
+    includeInSafetyFund: false,
+    allowNegativeBalance: false,
+    hideBalance: false,
+    isArchived: false,
+    color: "",
+    icon: "",
+    createdAt: "",
+    updatedAt: ""
   }],
+  cards: [],
   transfers: [],
   recurring: [],
   operations: [],
@@ -83,15 +104,13 @@ const pageMeta = {
 };
 
 let activeProfileId = "";
-let creatingNewProfile = false;
-let authMode = "login";
-let previousProfileId = "";
+let currentUser = null;
+let remoteRevision = 0;
+let authMode = AUTH_MODE_LOGIN;
+let authErrorText = "";
 let pendingEncryptedProfile = null;
 let vaultKeyBytes = null;
 let persistenceQueue = Promise.resolve();
-let newProfileReturnState = null;
-let newProfileReturnVault = null;
-let newProfileReturnPending = null;
 let state = loadState();
 let operationFilter = "all";
 let privacyMode = false;
@@ -102,6 +121,8 @@ let lastActivityAt = Date.now();
 let hiddenAt = 0;
 let failedUnlockAttempts = 0;
 let pendingEncryptedBackup = null;
+let frozenScrollY = 0;
+let viewportFreezeOwner = "";
 let calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
 const UNLOCK_ATTEMPT_LIMIT = 5;
@@ -113,6 +134,27 @@ function clone(value) {
 
 function uid() {
   return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function freezeViewport(owner) {
+  const root = document.documentElement;
+  if (!root.classList.contains("viewport-locked")) {
+    frozenScrollY = Math.max(0, window.scrollY || 0);
+    document.body.style.top = `-${frozenScrollY}px`;
+    root.classList.add("viewport-locked");
+  }
+  viewportFreezeOwner = owner;
+}
+
+function releaseViewport(owner) {
+  if (!document.documentElement.classList.contains("viewport-locked")) return;
+  if (viewportFreezeOwner && owner && viewportFreezeOwner !== owner) return;
+  const scrollY = frozenScrollY;
+  document.documentElement.classList.remove("viewport-locked");
+  document.body.style.top = "";
+  viewportFreezeOwner = "";
+  frozenScrollY = 0;
+  window.scrollTo(0, scrollY);
 }
 
 function isoToday() {
@@ -172,6 +214,25 @@ function escapeHtml(value) {
   })[char]);
 }
 
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  const email = normalizeEmail(value);
+  return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+}
+
+const ACCOUNT_TYPES = ["current", "savings", "deposit", "cash", "wallet", "credit", "investment", "other"];
+const LEGACY_ACCOUNT_TYPE_MAP = { card: "current" };
+const CARD_TYPES = ["debit", "credit"];
+const PAYMENT_SYSTEMS = ["mir", "visa", "mastercard", "unionpay", "other"];
+const TRANSACTION_TYPES = ["income", "expense", "transfer", "initial_balance", "balance_adjustment", "fee"];
+
+function emailDisplayName(email) {
+  return normalizeEmail(email).split("@")[0] || "Пользователь";
+}
+
 function bankRound(value, debt) {
   const factor = debt?.rounding === "rubles" ? 1 : 100;
   return Math.round((Number(value || 0) + Number.EPSILON) * factor) / factor;
@@ -204,14 +265,102 @@ function normalizeDebtRecord(item) {
   };
 }
 
+function normalizeAccountType(type) {
+  const mapped = LEGACY_ACCOUNT_TYPE_MAP[type] || type;
+  return ACCOUNT_TYPES.includes(mapped) ? mapped : "current";
+}
+
+function normalizeTransactionType(type) {
+  return TRANSACTION_TYPES.includes(type) ? type : (type === "income" ? "income" : "expense");
+}
+
+function initialBalanceOperationId(accountId) {
+  return `initial-balance:${accountId}`;
+}
+
+function explicitLastFourDigits(item) {
+  const value = item?.lastFourDigits ?? item?.last4 ?? item?.cardLastFour ?? "";
+  return /^[0-9]{4}$/.test(String(value)) ? String(value) : "";
+}
+
+function normalizePaymentSystem(value) {
+  return PAYMENT_SYSTEMS.includes(value) ? value : "other";
+}
+
+function normalizeCardType(value) {
+  return CARD_TYPES.includes(value) ? value : "debit";
+}
+
 function normalizeAccount(item, index = 0) {
-  const allowedTypes = ["card", "cash", "savings"];
+  const type = normalizeAccountType(item?.type);
   return {
     id: item?.id || `account-${index + 1}-${uid()}`,
-    name: String(item?.name || (index === 0 ? "Основная карта" : "Счёт")),
-    type: allowedTypes.includes(item?.type) ? item.type : "card",
-    openingBalance: Number(item?.openingBalance ?? item?.balance ?? 0),
-    createdAt: item?.createdAt || isoToday()
+    name: String(item?.name || (index === 0 ? "Основной счёт" : "Счёт")),
+    type,
+    bankName: item?.bankName || item?.bank || "",
+    currency: item?.currency || "₽",
+    includeInTotal: item?.includeInTotal !== false,
+    includeInSafetyFund: item?.includeInSafetyFund === true,
+    allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit",
+    hideBalance: item?.hideBalance === true,
+    isArchived: item?.isArchived === true,
+    color: item?.color || "",
+    icon: item?.icon || "",
+    createdAt: item?.createdAt || isoToday(),
+    updatedAt: item?.updatedAt || item?.createdAt || isoToday()
+  };
+}
+
+function normalizeCard(item, index = 0) {
+  const lastFourDigits = explicitLastFourDigits(item);
+  return {
+    id: item?.id || `card-${index + 1}-${uid()}`,
+    accountId: item?.accountId || "",
+    name: item?.name || "Карта",
+    lastFourDigits,
+    paymentSystem: normalizePaymentSystem(item?.paymentSystem),
+    cardType: normalizeCardType(item?.cardType),
+    isVirtual: item?.isVirtual === true,
+    expirationDate: item?.expirationDate || "",
+    creditLimit: Math.max(0, Number(item?.creditLimit || 0)),
+    isPrimary: item?.isPrimary !== false,
+    isArchived: item?.isArchived === true,
+    color: item?.color || "",
+    isLegacy: item?.isLegacy === true,
+    isMigrated: item?.isMigrated === true,
+    numberMissing: item?.numberMissing === true || !lastFourDigits,
+    createdAt: item?.createdAt || isoToday(),
+    updatedAt: item?.updatedAt || item?.createdAt || isoToday()
+  };
+}
+
+function normalizeOperationRecord(item, fallbackAccountId = "") {
+  const type = normalizeTransactionType(item?.type);
+  return {
+    ...item,
+    id: item?.id || uid(),
+    type,
+    amount: Number(item?.amount || 0),
+    category: item?.category || (type === "initial_balance" ? "Начальный остаток" : "Другое"),
+    accountId: item?.accountId || fallbackAccountId,
+    cardId: item?.cardId || "",
+    description: item?.description || item?.note || "",
+    note: item?.note || item?.description || "",
+    date: item?.date || isoToday(),
+    createdAt: item?.createdAt || item?.date || isoToday()
+  };
+}
+
+function normalizeTransferRecord(item) {
+  return {
+    id: item?.id || uid(),
+    fromAccountId: item?.fromAccountId || item?.from,
+    toAccountId: item?.toAccountId || item?.to,
+    amount: Number(item?.amount || 0),
+    fee: Math.max(0, Number(item?.fee || 0)),
+    date: item?.date || isoToday(),
+    note: item?.note || item?.comment || "",
+    comment: item?.comment || item?.note || ""
   };
 }
 
@@ -249,48 +398,50 @@ function normalizeRecurringRecord(item, fallbackAccountId) {
 
 function hydrateState(data = {}) {
   const settings = { ...DEFAULT_STATE.settings, ...(data.settings || {}) };
-  const operations = (Array.isArray(data.operations) ? data.operations : []).map(item => ({
-    ...item,
-    id: item.id || uid(),
-    type: item.type === "income" ? "income" : "expense",
-    amount: Number(item.amount || 0),
-    category: item.category || "Другое",
-    date: item.date || isoToday(),
-    note: item.note || ""
-  }));
   const savedAccounts = Array.isArray(data.accounts) ? data.accounts : [];
   let accounts;
 
   if (savedAccounts.length) {
-    accounts = savedAccounts.map(normalizeAccount);
+    accounts = savedAccounts.map((item, index) => ({
+      ...normalizeAccount(item, index),
+      currency: item?.currency || settings.currency || "₽"
+    }));
   } else {
-    const legacyNames = [...new Set(operations.map(item => String(item.account || "").trim()).filter(Boolean))];
+    const rawOperations = Array.isArray(data.operations) ? data.operations : [];
+    const legacyNames = [...new Set(rawOperations.map(item => String(item.account || "").trim()).filter(Boolean))];
     accounts = (legacyNames.length ? legacyNames : ["Основная карта"]).map((name, index) => normalizeAccount({
       id: index === 0 ? "account-main" : "",
       name,
-      type: index === 0 ? "card" : "cash",
-      openingBalance: index === 0 ? Number(settings.openingBalance || 0) : 0
+      type: index === 0 ? "current" : "cash",
+      currency: settings.currency || "₽"
     }, index));
   }
 
   const accountIds = new Set(accounts.map(account => account.id));
+  const cards = (Array.isArray(data.cards) ? data.cards : [])
+    .map(normalizeCard)
+    .filter(card => accountIds.has(card.accountId));
+  const cardIds = new Set(cards.map(card => card.id));
+  const operations = (Array.isArray(data.operations) ? data.operations : [])
+    .map(item => normalizeOperationRecord(item, accounts[0]?.id || ""))
+    .map(operation => {
+      const byLegacyName = accounts.find(account => account.name === String(operation.account || "").trim());
+      operation.accountId = accountIds.has(operation.accountId)
+        ? operation.accountId
+        : (byLegacyName?.id || accounts[0].id);
+      const card = cards.find(item => item.id === operation.cardId);
+      if (!card || card.accountId !== operation.accountId) operation.cardId = "";
+      operation.account = accounts.find(account => account.id === operation.accountId)?.name || accounts[0].name;
+      return operation;
+    });
+
   operations.forEach(operation => {
-    const byLegacyName = accounts.find(account => account.name === String(operation.account || "").trim());
-    operation.accountId = accountIds.has(operation.accountId)
-      ? operation.accountId
-      : (byLegacyName?.id || accounts[0].id);
-    operation.account = accounts.find(account => account.id === operation.accountId)?.name || accounts[0].name;
+    if (operation.type === "initial_balance") operation.isInitialBalance = true;
+    if (operation.type === "balance_adjustment") operation.isBalanceAdjustment = true;
   });
 
   const transfers = (Array.isArray(data.transfers) ? data.transfers : [])
-    .map(item => ({
-      id: item.id || uid(),
-      fromAccountId: item.fromAccountId || item.from,
-      toAccountId: item.toAccountId || item.to,
-      amount: Number(item.amount || 0),
-      date: item.date || isoToday(),
-      note: item.note || ""
-    }))
+    .map(normalizeTransferRecord)
     .filter(item => item.amount > 0 && item.fromAccountId !== item.toAccountId
       && accountIds.has(item.fromAccountId) && accountIds.has(item.toAccountId));
   const recurring = (Array.isArray(data.recurring) ? data.recurring : [])
@@ -298,7 +449,9 @@ function hydrateState(data = {}) {
     .map(item => ({ ...item, accountId: accountIds.has(item.accountId) ? item.accountId : accounts[0].id }))
     .filter(item => item.amount > 0);
 
-  settings.openingBalance = Number(accounts[0]?.openingBalance || 0);
+  settings.openingBalance = Number(operations.find(item =>
+    item.accountId === accounts[0]?.id && item.type === "initial_balance"
+  )?.amount || 0);
   if (data.settings?.profileCreated === undefined) {
     settings.profileCreated = Boolean(settings.login || settings.name || operations.length || (data.debts || []).length);
   }
@@ -309,6 +462,7 @@ function hydrateState(data = {}) {
     settings,
     categories: { ...DEFAULT_STATE.categories, ...(data.categories || {}) },
     accounts,
+    cards,
     transfers,
     recurring,
     operations,
@@ -467,32 +621,29 @@ function profileStorageKey(profileId) {
   return `${PROFILE_STORAGE_PREFIX}${profileId}`;
 }
 
-function loadProfileRegistry() {
+function purgeLegacyLocalAccounts() {
   try {
-    const profiles = JSON.parse(localStorage.getItem(PROFILE_REGISTRY_KEY) || "[]");
-    return Array.isArray(profiles) ? profiles.filter(profile => profile?.id) : [];
+    LEGACY_LOCAL_KEYS.forEach(key => localStorage.removeItem(key));
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(PROFILE_STORAGE_PREFIX)) localStorage.removeItem(key);
+    }
   } catch (error) {
-    console.warn("Не удалось прочитать список аккаунтов", error);
-    return [];
+    console.warn("Не удалось очистить старые локальные аккаунты", error);
   }
 }
 
-function saveProfileRegistry(profiles) {
-  localStorage.setItem(PROFILE_REGISTRY_KEY, JSON.stringify(profiles));
-}
-
 function profileSummary(profileId, profileState = state) {
-  const login = profileState.settings.login || profileState.settings.name || "Пользователь";
+  const login = currentUser?.login || profileState.settings.login || profileState.settings.name || "Пользователь";
   return {
-    id: profileId,
+    id: profileId || currentUser?.id || "",
     login,
-    name: profileState.settings.name || login,
-    avatar: profileState.settings.avatar || "",
-    passwordHash: profileState.settings.passwordHash || "",
+    name: currentUser?.name || profileState.settings.name || login,
+    avatar: currentUser?.avatar || profileState.settings.avatar || "",
     autoLockMinutes: Number(profileState.settings.autoLockMinutes || 5),
     lockOnHide: profileState.settings.lockOnHide !== false,
     theme: profileState.settings.theme || "light",
-    encryptedAtRest: Boolean(profileState.settings.encryptedAtRest),
+    encryptedAtRest: true,
     vaultPasswordWrap: profileState.settings.vaultPasswordWrap || null,
     updatedAt: new Date().toISOString()
   };
@@ -503,118 +654,159 @@ function lockedProfileState(summary = {}) {
   lockedState.settings = {
     ...lockedState.settings,
     login: summary.login || "",
+    email: summary.email || summary.login || "",
     name: summary.name || summary.login || "",
     avatar: summary.avatar || "",
-    passwordHash: summary.passwordHash || "",
     autoLockMinutes: Number(summary.autoLockMinutes || 5),
     lockOnHide: summary.lockOnHide !== false,
     theme: summary.theme || "light",
-    encryptedAtRest: Boolean(summary.encryptedAtRest),
+    encryptedAtRest: true,
     vaultPasswordWrap: summary.vaultPasswordWrap || null,
     profileCreated: true
   };
   return lockedState;
 }
 
-function upsertProfileSummary(profileId, profileState) {
-  if (!profileId || !profileState.settings.profileCreated) return;
-  const profiles = loadProfileRegistry();
-  const summary = profileSummary(profileId, profileState);
-  const index = profiles.findIndex(profile => profile.id === profileId);
-  if (index >= 0) profiles[index] = summary;
-  else profiles.push(summary);
-  saveProfileRegistry(profiles);
-  localStorage.setItem(ACTIVE_PROFILE_KEY, profileId);
-}
-
 function upsertCurrentProfile() {
-  upsertProfileSummary(activeProfileId, state);
-}
-
-function persistLoadedProfile(profileState) {
-  activeProfileId = uid();
-  localStorage.setItem(profileStorageKey(activeProfileId), JSON.stringify(profileState));
-  saveProfileRegistry([profileSummary(activeProfileId, profileState)]);
-  localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
-  localStorage.removeItem(STORAGE_KEY);
-  return profileState;
-}
-
-function loadProfileState(profileId) {
-  try {
-    const saved = localStorage.getItem(profileStorageKey(profileId));
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (parsed?.format === "kopilka-encrypted-profile") {
-        pendingEncryptedProfile = parsed;
-        const summary = loadProfileRegistry().find(profile => profile.id === profileId);
-        return lockedProfileState(summary);
-      }
-      pendingEncryptedProfile = null;
-      return hydrateState(migrateData(parsed));
-    }
-  } catch (error) {
-    console.warn("Не удалось загрузить аккаунт", error);
-  }
-  pendingEncryptedProfile = null;
-  return clone(DEFAULT_STATE);
+  saveState();
 }
 
 function loadState() {
-  try {
-    const profiles = loadProfileRegistry();
-    if (profiles.length) {
-      const requestedId = localStorage.getItem(ACTIVE_PROFILE_KEY);
-      activeProfileId = profiles.some(profile => profile.id === requestedId)
-        ? requestedId
-        : profiles[0].id;
-      const profileState = loadProfileState(activeProfileId);
-      if (profileState.settings.profileCreated) return profileState;
-    }
-
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const loaded = hydrateState(migrateData(JSON.parse(saved)));
-      return loaded.settings.profileCreated ? persistLoadedProfile(loaded) : loaded;
-    }
-    const legacy = localStorage.getItem(LEGACY_KEY);
-    if (legacy) return persistLoadedProfile(migrateLegacy(JSON.parse(legacy)));
-  } catch (error) {
-    console.warn("Не удалось загрузить данные", error);
-  }
+  purgeLegacyLocalAccounts();
   return clone(DEFAULT_STATE);
 }
 
-function saveState() {
-  state.schemaVersion = CURRENT_SCHEMA_VERSION;
-  try { cloudSync.schedulePush(); } catch (_) { /* синхронизация ещё не готова */ }
-  if (pendingEncryptedProfile && !vaultKeyBytes) return persistenceQueue;
-  if (state.settings.profileCreated && !activeProfileId) activeProfileId = uid();
-  if (activeProfileId) {
-    localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
-    localStorage.removeItem(STORAGE_KEY);
-    const profileId = activeProfileId;
-    const snapshot = clone(state);
-    if (vaultKeyBytes && state.settings.encryptedAtRest) {
-      const keySnapshot = new Uint8Array(vaultKeyBytes);
-      const writeJob = persistenceQueue
-        .catch(() => undefined)
-        .then(async () => {
-          const encrypted = await encryptWithRawKey(snapshot, keySnapshot);
-          localStorage.setItem(profileStorageKey(profileId), JSON.stringify(encrypted));
-          upsertProfileSummary(profileId, snapshot);
-        });
-      persistenceQueue = writeJob.catch(error =>
-        console.warn("Не удалось зашифровать данные профиля", error)
-      );
-      return writeJob;
-    }
-    localStorage.setItem(profileStorageKey(profileId), JSON.stringify(snapshot));
-    upsertProfileSummary(profileId, snapshot);
-    return Promise.resolve();
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
+async function apiRequest(path, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  let body = options.body;
+  if (body && typeof body !== "string" && !(body instanceof FormData)) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify(body);
   }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-  return Promise.resolve();
+  let response;
+  try {
+    response = await fetch(apiUrl(path), {
+      ...options,
+      headers,
+      body,
+      credentials: "include"
+    });
+  } catch (error) {
+    const message = location.protocol === "file:"
+      ? "Откройте приложение через серверный адрес. После перехода на серверные аккаунты режим file:// больше не подходит."
+      : "Сервер авторизации недоступен. Проверьте, что backend запущен.";
+    const requestError = new Error(message);
+    requestError.code = "NETWORK_ERROR";
+    throw requestError;
+  }
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      const parseError = new Error("Серверная часть не отвечает как API. Проверьте, что приложение запущено через Node.js backend, а не только как статические файлы.");
+      parseError.code = "BAD_API_RESPONSE";
+      throw parseError;
+    }
+  }
+  if (!response.ok) {
+    const error = new Error(data.message || "Сервер вернул ошибку");
+    error.code = data.code || "SERVER_ERROR";
+    error.payload = data;
+    throw error;
+  }
+  return data;
+}
+
+function remoteVaultFromPayload(payload) {
+  const vault = payload?.vault || null;
+  if (!vault?.envelope || !vault?.wrap) return null;
+  return vault;
+}
+
+function applyRemoteEnvelope(payload) {
+  currentUser = payload?.user || null;
+  activeProfileId = currentUser?.id || "";
+  const vault = remoteVaultFromPayload(payload);
+  remoteRevision = Number(vault?.revision || 0);
+  if (currentUser && vault) {
+    pendingEncryptedProfile = vault.envelope;
+    vaultKeyBytes = null;
+    state = lockedProfileState({
+      id: currentUser.id,
+      login: currentUser.login,
+      name: currentUser.name,
+      avatar: currentUser.avatar,
+      encryptedAtRest: true,
+      vaultPasswordWrap: vault.wrap
+    });
+    return true;
+  }
+  pendingEncryptedProfile = null;
+  vaultKeyBytes = null;
+  state = clone(DEFAULT_STATE);
+  return false;
+}
+
+function prepareStateForRemote(profileState = state) {
+  const snapshot = hydrateState(migrateData(profileState));
+  snapshot.schemaVersion = CURRENT_SCHEMA_VERSION;
+  if (currentUser?.id) {
+    snapshot.settings.profileCreated = true;
+    snapshot.settings.login = currentUser.login || snapshot.settings.login;
+    snapshot.settings.email = snapshot.settings.email || currentUser.login || snapshot.settings.login;
+    snapshot.settings.name = snapshot.settings.name || currentUser.name || snapshot.settings.login;
+    snapshot.settings.encryptedAtRest = true;
+  }
+  return snapshot;
+}
+
+function saveState() {
+  state = prepareStateForRemote(state);
+  if (!currentUser?.id || pendingEncryptedProfile || !vaultKeyBytes) return persistenceQueue;
+  const snapshot = clone(state);
+  const keySnapshot = new Uint8Array(vaultKeyBytes);
+  const writeJob = persistenceQueue
+    .catch(() => undefined)
+    .then(async () => {
+      const envelope = await encryptWithRawKey(snapshot, keySnapshot);
+      const result = await apiRequest("/api/vault", {
+        method: "PUT",
+        body: {
+          revision: remoteRevision,
+          envelope,
+          wrap: snapshot.settings.vaultPasswordWrap,
+          profile: {
+            name: snapshot.settings.name,
+            avatar: snapshot.settings.avatar
+          }
+        }
+      });
+      remoteRevision = Number(result.vault?.revision || remoteRevision);
+      pendingEncryptedProfile = null;
+      if (currentUser) {
+        currentUser.name = snapshot.settings.name;
+        currentUser.avatar = snapshot.settings.avatar;
+      }
+      authErrorText = "";
+      return result;
+    });
+  persistenceQueue = writeJob.catch(error => {
+    console.warn("Не удалось синхронизировать данные с сервером", error);
+    if (error.code === "VAULT_CONFLICT") {
+      authErrorText = "Данные изменились на другом устройстве. Обновите страницу, чтобы получить свежую версию.";
+      showToast(authErrorText);
+      return;
+    }
+    authErrorText = error.message || "Не удалось сохранить данные на сервере";
+    showToast(authErrorText);
+  });
+  return writeJob;
 }
 
 async function enableEncryptedStorage(password) {
@@ -632,8 +824,13 @@ async function openEncryptedProfile(password) {
   const key = await unwrapVaultKey(wrapper, password);
   const decrypted = await decryptWithRawKey(pendingEncryptedProfile, key);
   state = hydrateState(migrateData(decrypted));
+  state = prepareStateForRemote(state);
   vaultKeyBytes = key;
   pendingEncryptedProfile = null;
+  if (currentUser) {
+    currentUser.name = state.settings.name || currentUser.login;
+    currentUser.avatar = state.settings.avatar || "";
+  }
   processRecurringOperations();
   renderAll();
 }
@@ -649,7 +846,7 @@ function hasAppProtection() {
 }
 
 function unlockGuardKey() {
-  return `kopilka_unlock_guard:${activeProfileId || "default"}`;
+  return `kopilka_unlock_guard:${currentUser?.id || activeProfileId || "server"}`;
 }
 
 function readUnlockGuard() {
@@ -702,17 +899,13 @@ function unlockApp() {
   document.querySelector("#lockError").textContent = "";
   document.querySelector("#unlockCode").value = "";
   document.body.style.overflow = "";
+  releaseViewport("lock");
 }
 
 function renderLockProfiles() {
-  const profiles = loadProfileRegistry();
   const container = document.querySelector("#lockProfileSwitch");
-  container.hidden = profiles.length < 2;
-  document.querySelector("#lockProfileList").innerHTML = profiles.map(profile => `
-    <button class="lock-profile-choice ${profile.id === activeProfileId ? "active" : ""}" type="button" data-lock-profile-id="${escapeHtml(profile.id)}">
-      <span>${profileAvatarMarkup(profile)}</span>
-      <b>${escapeHtml(profile.name || profile.login || "Пользователь")}</b>
-    </button>`).join("");
+  container.hidden = true;
+  document.querySelector("#lockProfileList").innerHTML = "";
 }
 
 function lockApp() {
@@ -726,12 +919,18 @@ function lockApp() {
     pendingEncryptedProfile
       ? `${state.settings.login || state.settings.name || "Пользователь"}, введите пароль для расшифровки данных.`
       : `${state.settings.login || state.settings.name || "Пользователь"}, введите пароль или PIN-код.`;
+  document.querySelector("#unlockMethodLabel").textContent =
+    pendingEncryptedProfile ? "Пароль" : "Пароль или PIN";
+  document.querySelector("#unlockCode").placeholder =
+    pendingEncryptedProfile ? "Введите пароль" : "Введите код";
   document.querySelector("#biometricUnlockButton").hidden =
     !state.settings.biometricCredential?.id || Boolean(pendingEncryptedProfile);
+  updateBiometricLockState();
   document.querySelector("#lockError").textContent = "";
   document.querySelector("#unlockCode").value = "";
   renderLockProfiles();
   document.body.style.overflow = "hidden";
+  freezeViewport("lock");
   setTimeout(() => document.querySelector("#unlockCode").focus(), 80);
 }
 
@@ -781,6 +980,42 @@ async function biometricSupported() {
   if (!window.isSecureContext || !window.PublicKeyCredential || !navigator.credentials) return false;
   if (!PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) return false;
   return PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(() => false);
+}
+
+async function updateBiometricLockState() {
+  const button = document.querySelector("#biometricUnlockButton");
+  const hint = document.querySelector("#biometricLockHint");
+  if (pendingEncryptedProfile) {
+    button.hidden = true;
+    hint.textContent = "После полного перезапуска сначала нужен пароль для расшифровки базы.";
+    return;
+  }
+  if (!window.isSecureContext) {
+    button.hidden = true;
+    hint.textContent = "Биометрия доступна только на сайте с защищённым HTTPS-соединением.";
+    return;
+  }
+  if (!state.settings.biometricCredential?.id) {
+    button.hidden = true;
+    hint.textContent = "";
+    return;
+  }
+  const supported = await biometricSupported();
+  if (document.querySelector("#appLock").hidden) return;
+  button.hidden = !supported;
+  hint.textContent = supported
+    ? "Биометрия привязана к этому устройству и адресу сайта."
+    : "Браузер или устройство сейчас не предоставляют биометрический вход.";
+}
+
+function biometricErrorMessage(error) {
+  if (error?.name === "SecurityError") {
+    return "Биометрия привязана к другому адресу сайта. Откройте настройки и подключите её заново.";
+  }
+  if (error?.name === "NotAllowedError") {
+    return "Проверка Face ID или отпечатка отменена либо запрещена настройками устройства.";
+  }
+  return "Биометрия сейчас недоступна. Войдите по паролю или PIN-коду.";
 }
 
 async function registerBiometric() {
@@ -859,11 +1094,47 @@ function accountName(id) {
 }
 
 function accountTypeName(type) {
-  return type === "cash" ? "Наличные" : type === "savings" ? "Накопительный счёт" : "Банковская карта";
+  return {
+    current: "Текущий счёт",
+    savings: "Накопительный счёт",
+    deposit: "Вклад",
+    cash: "Наличные",
+    wallet: "Электронный кошелёк",
+    credit: "Кредитный счёт",
+    investment: "Инвестиционный счёт",
+    other: "Другой счёт",
+    card: "Банковская карта"
+  }[type] || "Текущий счёт";
 }
 
 function accountIcon(type) {
-  return type === "cash" ? "₽" : type === "savings" ? "◇" : "▣";
+  if (type === "cash") return "₽";
+  if (type === "savings" || type === "deposit") return "◇";
+  if (type === "wallet") return "◉";
+  if (type === "credit") return "−";
+  return "▣";
+}
+
+function accountVisualClass(type) {
+  if (type === "cash") return "cash";
+  if (type === "savings" || type === "deposit") return "savings";
+  return "card";
+}
+
+function activeAccounts() {
+  return state.accounts.filter(account => account.isArchived !== true);
+}
+
+function cardsForAccount(accountId, includeArchived = false) {
+  return state.cards.filter(card =>
+    card.accountId === accountId && (includeArchived || card.isArchived !== true)
+  );
+}
+
+function cardDisplayName(card) {
+  if (!card) return "";
+  const digits = card.lastFourDigits ? `•••• ${card.lastFourDigits}` : "Карта без номера";
+  return card.name && card.name !== "Карта" ? `${card.name} · ${digits}` : digits;
 }
 
 function accountBalance(id) {
@@ -872,7 +1143,49 @@ function accountBalance(id) {
 }
 
 function totalAccountsBalance() {
-  return roundMoney(state.accounts.reduce((sum, account) => sum + accountBalance(account.id), 0));
+  return calculateAccountsTotal(state.accounts, state.operations, state.transfers);
+}
+
+function initialBalanceOperation(accountId) {
+  return state.operations.find(operation =>
+    operation.id === initialBalanceOperationId(accountId)
+    || (operation.accountId === accountId && operation.type === "initial_balance")
+  );
+}
+
+function initialBalanceAmount(accountId) {
+  return Number(initialBalanceOperation(accountId)?.amount || 0);
+}
+
+function upsertInitialBalanceOperation(accountId, amount, date = isoToday()) {
+  const account = accountById(accountId);
+  if (!account) return;
+  const operation = {
+    id: initialBalanceOperationId(accountId),
+    accountId,
+    cardId: "",
+    type: "initial_balance",
+    amount: Number(amount || 0),
+    category: "Начальный остаток",
+    description: "Начальный остаток счёта",
+    note: "Начальный остаток счёта",
+    date,
+    isInitialBalance: true,
+    createdAt: date
+  };
+  const existingIndex = state.operations.findIndex(item =>
+    item.id === operation.id || (item.accountId === accountId && item.type === "initial_balance")
+  );
+  if (existingIndex >= 0) {
+    state.operations[existingIndex] = {
+      ...state.operations[existingIndex],
+      ...operation,
+      id: state.operations[existingIndex].id || operation.id,
+      createdAt: state.operations[existingIndex].createdAt || operation.createdAt
+    };
+  } else {
+    state.operations.push(operation);
+  }
 }
 
 function daysUntil(value) {
@@ -974,12 +1287,14 @@ function totals() {
   let expenseCount = 0;
 
   state.operations.forEach(operation => {
+    if (!operationAffectsAnalytics(operation)) return;
     const amount = Number(operation.amount || 0);
-    const sign = operation.type === "income" ? 1 : -1;
+    const isIncome = operation.type === "income";
+    const sign = isIncome ? 1 : -1;
     if (operation.type === "income") allIncome += amount;
     else allExpense += amount;
     if (String(operation.date).slice(0, 7) === currentMonth) {
-      if (operation.type === "income") {
+      if (isIncome) {
         monthIncome += amount;
         incomeCount += 1;
       } else {
@@ -988,6 +1303,17 @@ function totals() {
       }
     }
     if (String(operation.date).slice(0, 7) === previousMonth) previousNet += sign * amount;
+  });
+
+  state.transfers.forEach(transfer => {
+    const fee = transferFee(transfer);
+    if (fee <= 0) return;
+    allExpense += fee;
+    if (String(transfer.date).slice(0, 7) === currentMonth) {
+      monthExpense += fee;
+      expenseCount += 1;
+    }
+    if (String(transfer.date).slice(0, 7) === previousMonth) previousNet -= fee;
   });
 
   const debtTotal = state.debts.reduce((sum, debt) => sum + Number(debt.balance || 0), 0);
@@ -1021,7 +1347,35 @@ function getHealthScore(summary) {
 }
 
 function visualFor(category, type) {
+  if (type === "initial_balance") return ["＋", "sky"];
+  if (type === "balance_adjustment") return ["≈", "lilac"];
+  if (type === "fee") return ["−", "coral"];
   return categoryVisuals[category] || [type === "income" ? "↗" : "↘", type === "income" ? "mint" : "coral"];
+}
+
+function operationTypeLabel(type) {
+  return {
+    income: "Доход",
+    expense: "Расход",
+    fee: "Комиссия",
+    initial_balance: "Начальный остаток",
+    balance_adjustment: "Корректировка",
+    transfer: "Перевод"
+  }[type] || "Операция";
+}
+
+function operationAmountPrefix(type, amount) {
+  if (type === "income" || type === "initial_balance") return Number(amount || 0) >= 0 ? "+" : "";
+  if (type === "expense" || type === "fee") return "−";
+  if (type === "balance_adjustment") return Number(amount || 0) >= 0 ? "+" : "";
+  return "";
+}
+
+function operationAmountClass(type, amount) {
+  if (type === "income") return "income";
+  if (type === "expense" || type === "fee") return "expense";
+  if (type === "balance_adjustment" && Number(amount || 0) < 0) return "expense";
+  return "";
 }
 
 function renderDashboard() {
@@ -1087,10 +1441,12 @@ function renderRecentTransactions() {
   }
   target.innerHTML = operations.map(operation => {
     const [icon, color] = visualFor(operation.category, operation.type);
+    const amountClass = operationAmountClass(operation.type, operation.amount);
+    const amount = Math.abs(Number(operation.amount || 0));
     return `<div class="transaction-item">
       <span class="stat-icon ${color}">${icon}</span>
       <div class="transaction-copy"><b>${escapeHtml(operation.category)}</b><small>${escapeHtml(operation.note || accountName(operation.accountId))} · ${escapeHtml(accountName(operation.accountId))} · ${formatDate(operation.date, true)}</small></div>
-      <strong class="transaction-amount ${operation.type} sensitive">${operation.type === "income" ? "+" : "−"} ${money(operation.amount)}</strong>
+      <strong class="transaction-amount ${amountClass} sensitive">${operationAmountPrefix(operation.type, operation.amount)} ${money(amount)}</strong>
     </div>`;
   }).join("");
 }
@@ -1146,26 +1502,39 @@ function renderOperations() {
   }
   target.innerHTML = operations.map(operation => {
     const [icon, color] = visualFor(operation.category, operation.type);
+    const amountClass = operationAmountClass(operation.type, operation.amount);
+    const amount = Math.abs(Number(operation.amount || 0));
+    const actions = operation.type === "income" || operation.type === "expense"
+      ? `<button class="row-menu" data-edit-operation="${operation.id}" aria-label="Изменить">✎</button><button class="row-menu" data-delete-operation="${operation.id}" aria-label="Удалить">×</button>`
+      : "";
     return `<tr>
-      <td><div class="row-title"><span class="stat-icon ${color}">${icon}</span><div><b>${escapeHtml(operation.note || operation.category)}</b><small>${operation.type === "income" ? "Доход" : "Расход"}</small></div></div></td>
+      <td><div class="row-title"><span class="stat-icon ${color}">${icon}</span><div><b>${escapeHtml(operation.note || operation.category)}</b><small>${operationTypeLabel(operation.type)}</small></div></div></td>
       <td>${escapeHtml(operation.category)}</td>
       <td>${formatDate(operation.date, true)}</td>
       <td>${escapeHtml(accountName(operation.accountId))}</td>
-      <td class="${operation.type === "income" ? "amount-income" : "amount-expense"} sensitive">${operation.type === "income" ? "+" : "−"} ${money(operation.amount)}</td>
-      <td><button class="row-menu" data-edit-operation="${operation.id}" aria-label="Изменить">✎</button><button class="row-menu" data-delete-operation="${operation.id}" aria-label="Удалить">×</button></td>
+      <td class="${amountClass === "income" ? "amount-income" : amountClass === "expense" ? "amount-expense" : ""} sensitive">${operationAmountPrefix(operation.type, operation.amount)} ${money(amount)}</td>
+      <td>${actions}</td>
     </tr>`;
   }).join("");
 }
 
 function renderAccounts() {
-  const accountCount = state.accounts.length;
+  const accounts = activeAccounts();
+  const accountCount = accounts.length;
+  const cardCount = state.cards.filter(card => card.isArchived !== true).length;
   document.querySelector("#accountsTotal").textContent = money(totalAccountsBalance());
   document.querySelector("#accountsCount").textContent =
-    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])}`;
-  document.querySelector("#accountCards").innerHTML = state.accounts.map(account => {
+    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])}${cardCount ? ` · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}` : ""}`;
+  document.querySelector("#accountCards").innerHTML = accounts.map(account => {
     const balance = accountBalance(account.id);
-    const operationCount = state.operations.filter(operation => operation.accountId === account.id).length;
-    return `<article class="account-card ${account.type}">
+    const accountCards = cardsForAccount(account.id);
+    const cardLabel = accountCards.length
+      ? accountCards.map(cardDisplayName).join(" · ")
+      : accountTypeName(account.type);
+    const operationCount = state.operations.filter(operation =>
+      operation.accountId === account.id && operation.type !== "initial_balance"
+    ).length;
+    return `<article class="account-card ${accountVisualClass(account.type)}">
       <div class="account-card-head">
         <span class="account-card-icon">${accountIcon(account.type)}</span>
         <div>
@@ -1175,7 +1544,7 @@ function renderAccounts() {
       </div>
       <div class="account-card-name">${escapeHtml(account.name)}</div>
       <strong class="account-card-balance sensitive">${money(balance)}</strong>
-      <div class="account-card-foot"><span>${accountTypeName(account.type)}</span><span>${operationCount} ${plural(operationCount, ["операция", "операции", "операций"])}</span></div>
+      <div class="account-card-foot"><span>${escapeHtml(cardLabel)}</span><span>${operationCount} ${plural(operationCount, ["операция", "операции", "операций"])}</span></div>
     </article>`;
   }).join("");
 
@@ -1187,7 +1556,7 @@ function renderAccounts() {
         <span class="transfer-icon">⇄</span>
         <div class="transfer-copy">
           <b>${escapeHtml(accountName(transfer.fromAccountId))} → ${escapeHtml(accountName(transfer.toAccountId))}</b>
-          <small>${formatDate(transfer.date, true)}${transfer.note ? ` · ${escapeHtml(transfer.note)}` : ""}</small>
+          <small>${formatDate(transfer.date, true)}${transferFee(transfer) ? ` · комиссия ${money(transferFee(transfer))}` : ""}${transfer.note ? ` · ${escapeHtml(transfer.note)}` : ""}</small>
         </div>
         <strong class="sensitive">${money(transfer.amount)}</strong>
         <button class="row-menu" data-delete-transfer="${transfer.id}" aria-label="Удалить перевод">×</button>
@@ -1484,19 +1853,31 @@ function monthBuckets() {
     });
   }
   state.operations.forEach(operation => {
+    if (!operationAffectsAnalytics(operation)) return;
     const bucket = months.find(month => month.key === String(operation.date).slice(0, 7));
-    if (bucket) bucket[operation.type] += Number(operation.amount || 0);
+    if (!bucket) return;
+    if (operation.type === "income") bucket.income += Number(operation.amount || 0);
+    else bucket.expense += Math.abs(Number(operation.amount || 0));
+  });
+  state.transfers.forEach(transfer => {
+    const fee = transferFee(transfer);
+    if (fee <= 0) return;
+    const bucket = months.find(month => month.key === String(transfer.date).slice(0, 7));
+    if (bucket) bucket.expense += fee;
   });
   return months;
 }
 
 function monthOperationTotals(key, predicate = () => true) {
-  return state.operations
-    .filter(operation => String(operation.date).slice(0, 7) === key && predicate(operation))
+  const totals = state.operations
+    .filter(operation => operationAffectsAnalytics(operation) && String(operation.date).slice(0, 7) === key && predicate(operation))
     .reduce((result, operation) => {
-      result[operation.type] += Number(operation.amount || 0);
+      if (operation.type === "income") result.income += Number(operation.amount || 0);
+      else result.expense += Math.abs(Number(operation.amount || 0));
       return result;
     }, { income: 0, expense: 0 });
+  totals.expense += calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === key);
+  return totals;
 }
 
 function recurringAmountForMonth(item, key) {
@@ -1557,15 +1938,15 @@ function balanceForecast() {
 }
 
 function capitalHistory() {
-  const openingBalance = state.accounts.reduce((sum, account) => sum + Number(account.openingBalance || 0), 0);
   const points = [];
   for (let offset = -5; offset <= 0; offset += 1) {
     const date = shiftMonth(new Date(), offset);
     const key = monthKey(date);
-    const accountValue = openingBalance + state.operations
-      .filter(operation => String(operation.date).slice(0, 7) <= key)
-      .reduce((sum, operation) =>
-        sum + (operation.type === "income" ? 1 : -1) * Number(operation.amount || 0), 0);
+    const accountValue = calculateAccountsTotal(
+      state.accounts,
+      state.operations.filter(operation => String(operation.date).slice(0, 7) <= key),
+      state.transfers.filter(transfer => String(transfer.date).slice(0, 7) <= key)
+    );
     const debtValue = state.debts.reduce((sum, debt) => {
       const principalPaidLater = (debt.paymentHistory || [])
         .filter(payment => String(payment.date).slice(0, 7) > key)
@@ -1691,8 +2072,14 @@ function renderAnalytics() {
   const currentMonth = monthKey();
   const categories = {};
   state.operations
-    .filter(operation => operation.type === "expense" && String(operation.date).slice(0, 7) === currentMonth)
-    .forEach(operation => { categories[operation.category] = (categories[operation.category] || 0) + Number(operation.amount || 0); });
+    .filter(operation =>
+      operationAffectsAnalytics(operation)
+      && operation.type !== "income"
+      && String(operation.date).slice(0, 7) === currentMonth
+    )
+    .forEach(operation => { categories[operation.category] = (categories[operation.category] || 0) + Math.abs(Number(operation.amount || 0)); });
+  const transferFees = calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === currentMonth);
+  if (transferFees > 0) categories["Комиссии"] = (categories["Комиссии"] || 0) + transferFees;
   const entries = Object.entries(categories).sort((a, b) => b[1] - a[1]).slice(0, 7);
   const total = entries.reduce((sum, entry) => sum + entry[1], 0);
   const colors = ["#6c5ce7", "#ff735f", "#20b987", "#4d9de0", "#f7b731", "#a18cf2", "#ee8a78"];
@@ -1711,7 +2098,7 @@ function renderAnalytics() {
 function renderSettings() {
   document.querySelector("#userName").value = state.settings.name;
   document.querySelector("#userEmail").value = state.settings.email || "";
-  document.querySelector("#openingBalance").value = Number(state.accounts[0]?.openingBalance || 0);
+  document.querySelector("#openingBalance").value = initialBalanceAmount(state.accounts[0]?.id);
   document.querySelector("#reserveTarget").value = state.settings.reserveTarget;
   document.querySelector("#reserveSaved").value = state.settings.reserveSaved;
   document.querySelector("#currency").value = state.settings.currency;
@@ -1737,19 +2124,28 @@ function renderSettings() {
   const encryptedAtRest = Boolean(state.settings.encryptedAtRest);
   document.querySelector("#storageEncryptionStatusDot").classList.toggle("active", encryptedAtRest);
   document.querySelector("#storageEncryptionStatusText").textContent = encryptedAtRest
-    ? "Данные зашифрованы AES‑256"
-    : "Включится после входа по паролю";
+    ? "Суммы и записи зашифрованы AES‑256"
+    : "Включится после серверного входа";
   document.querySelector("#removePinButton").hidden = !hasPin;
   document.querySelector("#removeBiometricButton").hidden = !hasBiometric;
   document.querySelector("#biometricSetupButton").textContent =
     hasBiometric ? "◉ Перенастроить биометрию" : "◉ Настроить биометрию";
-  if (!window.isSecureContext || !window.PublicKeyCredential) {
+  if (!window.isSecureContext) {
     document.querySelector("#biometricSetupButton").disabled = true;
-    document.querySelector("#biometricStatusText").textContent = "Нужен защищённый режим";
+    document.querySelector("#biometricStatusText").textContent = "Нужен HTTPS";
+  } else if (!window.PublicKeyCredential || !navigator.credentials) {
+    document.querySelector("#biometricSetupButton").disabled = true;
+    document.querySelector("#biometricStatusText").textContent = "Не поддерживается браузером";
   } else {
-    document.querySelector("#biometricSetupButton").disabled = false;
+    const renderedProfileId = activeProfileId;
+    biometricSupported().then(supported => {
+      if (activeProfileId !== renderedProfileId) return;
+      document.querySelector("#biometricSetupButton").disabled = !supported;
+      if (!supported) {
+        document.querySelector("#biometricStatusText").textContent = "Недоступна на этом устройстве";
+      }
+    });
   }
-  try { cloudSync.renderCard(); } catch (_) { /* синхронизация ещё не готова */ }
 }
 
 function profileInitial(profile = state.settings) {
@@ -1778,104 +2174,47 @@ function closeDesktopAddMenu() {
 }
 
 function renderProfileMenu() {
-  const displayName = state.settings.name || state.settings.email || state.settings.login || "Пользователь";
-  const account = state.settings.email || state.settings.login || "";
+  const displayName = state.settings.name || currentUser?.name || state.settings.login || currentUser?.login || "Пользователь";
+  const login = state.settings.login || currentUser?.login || displayName;
   const avatar = profileAvatarMarkup(state.settings);
-  document.querySelector("#profileTriggerAvatar").innerHTML = avatar;
   document.querySelector("#profileTriggerName").textContent = displayName;
+  document.querySelector("#profileTriggerAvatar").innerHTML = avatar;
   document.querySelector("#profileMenuAvatar").innerHTML = avatar;
   document.querySelector("#profileMenuName").textContent = displayName;
-  document.querySelector("#profileMenuLogin").textContent = account
-    ? (account.includes("@") ? account : `@${account}`)
-    : "";
+  document.querySelector("#profileMenuLogin").textContent = login;
   document.querySelector("#profileThemeIcon").textContent = state.settings.theme === "dark" ? "☀" : "☾";
   document.querySelector("#profileThemeLabel").textContent =
     state.settings.theme === "dark" ? "Светлая тема" : "Тёмная тема";
 
-  const profiles = loadProfileRegistry();
-  document.querySelector("#profileList").innerHTML = profiles.map(profile => {
-    const active = profile.id === activeProfileId;
-    return `<button class="profile-account ${active ? "active" : ""}" type="button" data-profile-id="${escapeHtml(profile.id)}">
-      <span class="profile-account-avatar">${profileAvatarMarkup(profile)}</span>
-      <span class="profile-account-copy"><b>${escapeHtml(profile.name || profile.login || "Пользователь")}</b><small>@${escapeHtml(profile.login || "user")}</small></span>
-      <span class="profile-account-check">${active ? "✓" : "›"}</span>
-    </button>`;
-  }).join("");
+  document.querySelector("#profileList").innerHTML = currentUser
+    ? `<div class="profile-account active">
+        <span class="profile-account-avatar">${avatar}</span>
+        <span class="profile-account-copy"><b>${escapeHtml(displayName)}</b><small>серверный аккаунт · ${escapeHtml(login)}</small></span>
+        <span class="profile-account-check">✓</span>
+      </div>`
+    : `<div class="profile-account">
+        <span class="profile-account-avatar">?</span>
+        <span class="profile-account-copy"><b>Вход не выполнен</b><small>подключитесь к серверу</small></span>
+        <span class="profile-account-check">!</span>
+      </div>`;
 }
 
-function switchProfile(profileId) {
-  if (!profileId || profileId === activeProfileId) {
-    closeProfileMenu();
-    return;
-  }
-  saveState();
-  vaultKeyBytes = null;
-  pendingEncryptedProfile = null;
-  activeProfileId = profileId;
-  localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
-  state = loadProfileState(activeProfileId);
-  operationFilter = "all";
-  privacyMode = false;
-  calendarCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+async function switchProfile() {
   closeProfileMenu();
-  try { cloudSync.init(); } catch (_) { /* синхронизация ещё не готова */ }
-  renderAll();
-  showPage("dashboard");
-  syncAccessState();
+  await logoutRemote();
 }
 
-function switchLockedProfile(profileId) {
-  if (!profileId || profileId === activeProfileId) return;
-  saveState();
-  vaultKeyBytes = null;
-  pendingEncryptedProfile = null;
-  activeProfileId = profileId;
-  localStorage.setItem(ACTIVE_PROFILE_KEY, activeProfileId);
-  state = loadProfileState(activeProfileId);
-  try { cloudSync.init(); } catch (_) { /* синхронизация ещё не готова */ }
-  renderAll();
-  showPage("dashboard");
-  lockApp();
+function switchLockedProfile() {
+  return;
 }
 
-function startNewProfile() {
-  saveState();
-  previousProfileId = activeProfileId;
-  newProfileReturnState = state;
-  newProfileReturnVault = vaultKeyBytes ? new Uint8Array(vaultKeyBytes) : null;
-  newProfileReturnPending = pendingEncryptedProfile;
-  creatingNewProfile = true;
-  const currentTheme = state.settings.theme;
-  state = clone(DEFAULT_STATE);
-  state.settings.theme = currentTheme;
-  vaultKeyBytes = null;
-  pendingEncryptedProfile = null;
+async function startNewProfile() {
   closeProfileMenu();
-  showOnboarding();
+  await logoutRemote();
 }
 
 function cancelOnboarding() {
-  if (!creatingNewProfile) {
-    hideOnboarding();
-    return;
-  }
-  activeProfileId = previousProfileId;
-  if (newProfileReturnState) {
-    state = newProfileReturnState;
-    vaultKeyBytes = newProfileReturnVault;
-    pendingEncryptedProfile = newProfileReturnPending;
-  } else {
-    vaultKeyBytes = null;
-    pendingEncryptedProfile = null;
-    state = loadProfileState(activeProfileId);
-  }
-  creatingNewProfile = false;
-  previousProfileId = "";
-  newProfileReturnState = null;
-  newProfileReturnVault = null;
-  newProfileReturnPending = null;
-  renderAll();
-  hideOnboarding();
+  if (currentUser || state.settings.profileCreated) hideOnboarding();
 }
 
 function resizeProfilePhoto(file) {
@@ -1911,39 +2250,162 @@ function resizeProfilePhoto(file) {
 }
 
 function fillOnboarding() {
-  const register = authMode === "register";
-  const passwordField = document.querySelector("#onboardingPassword");
-  passwordField.value = "";
-  passwordField.setAttribute("autocomplete", register ? "new-password" : "current-password");
-  document.querySelector("#onboardingError").textContent = "";
-  document.querySelector("#onboardingTitle").textContent = register
-    ? "Создайте аккаунт"
-    : "Вход в Копилку";
-  document.querySelector("#onboardingIntro").textContent = register
-    ? "Почта и пароль — всё, что нужно. Финансы шифруются на устройстве."
-    : "Войдите в аккаунт, чтобы ваши финансы были доступны на всех устройствах.";
-  document.querySelector("#onboardingSubmit").innerHTML = register
-    ? `Зарегистрироваться <span>→</span>`
-    : `Войти <span>→</span>`;
-  document.querySelector("#onboardingToggle").textContent = register
-    ? "Уже есть аккаунт? Войти"
-    : "Нет аккаунта? Зарегистрироваться";
+  const hasProfile = Boolean(currentUser || state.settings.profileCreated);
+  authMode = AUTH_MODE_LOGIN;
+  document.querySelector("#onboardingLogin").value = hasProfile ? "" : (state.settings.login || "");
+  document.querySelector("#onboardingPassword").value = "";
+  document.querySelector("#onboardingTitle").textContent = "Войдите в личный кабинет";
+  document.querySelector("#onboardingIntro").textContent =
+    "Введите электронную почту и пароль. Данные подтянутся с сервера на любом вашем устройстве.";
+  document.querySelector("#onboardingSubmit").innerHTML = `Войти <span>→</span>`;
+  document.querySelector("#onboardingSubmit").dataset.authAction = AUTH_MODE_LOGIN;
+  document.querySelector("#existingAccountButton").hidden = false;
+  document.querySelector("#existingAccountButton").textContent = "Создать новый аккаунт";
+  document.querySelector("#existingAccountButton").dataset.authAction = AUTH_MODE_REGISTER;
+  document.querySelector("#onboardingClose").hidden = !hasProfile;
+  document.querySelector("#onboardingLocalNote").hidden = false;
+  document.querySelector("#onboardingLocalNote").textContent =
+    authErrorText || "Почта используется как уникальный логин: два аккаунта с одной почтой создать нельзя.";
 }
 
 function showOnboarding() {
   fillOnboarding();
   document.querySelector("#onboarding").hidden = false;
   document.body.style.overflow = "hidden";
+  freezeViewport("onboarding");
 }
 
 function hideOnboarding() {
   document.querySelector("#onboarding").hidden = true;
+  document.querySelector("#registrationDialog").hidden = true;
   document.body.style.overflow = "";
+  releaseViewport("onboarding");
 }
 
 function syncOnboardingVisibility() {
   if (state.settings.profileCreated) hideOnboarding();
   else showOnboarding();
+}
+
+function resetToSignedOutState(message = "") {
+  currentUser = null;
+  activeProfileId = "";
+  remoteRevision = 0;
+  pendingEncryptedProfile = null;
+  vaultKeyBytes = null;
+  appUnlocked = true;
+  authMode = AUTH_MODE_LOGIN;
+  authErrorText = message;
+  state = clone(DEFAULT_STATE);
+  purgeLegacyLocalAccounts();
+}
+
+async function createEncryptedInitialVault(email, password, name = "") {
+  const displayName = String(name || "").trim() || emailDisplayName(email);
+  const initialState = hydrateState(clone(DEFAULT_STATE));
+  initialState.settings.login = email;
+  initialState.settings.email = email;
+  initialState.settings.name = displayName;
+  initialState.settings.passwordHash = await createSecretHash(password);
+  initialState.settings.profileCreated = true;
+  initialState.settings.encryptedAtRest = true;
+  vaultKeyBytes = randomBytes(32);
+  initialState.settings.vaultPasswordWrap = await wrapVaultKey(vaultKeyBytes, password);
+  const envelope = await encryptWithRawKey(initialState, vaultKeyBytes);
+  return { initialState, envelope, wrap: initialState.settings.vaultPasswordWrap };
+}
+
+async function checkEmailAvailability(email) {
+  return apiRequest(`/api/auth/check?email=${encodeURIComponent(email)}`);
+}
+
+async function registerRemoteAccount(email, password, name = "") {
+  const displayName = String(name || "").trim() || emailDisplayName(email);
+  const { initialState, envelope, wrap } = await createEncryptedInitialVault(email, password, displayName);
+  const result = await apiRequest("/api/auth/register", {
+    method: "POST",
+    body: {
+      login: email,
+      password,
+      envelope,
+      wrap,
+      profile: { name: displayName, avatar: "" }
+    }
+  });
+  currentUser = result.user;
+  activeProfileId = currentUser.id;
+  remoteRevision = Number(result.vault?.revision || 1);
+  state = prepareStateForRemote(initialState);
+  pendingEncryptedProfile = null;
+  authErrorText = "";
+  renderAll();
+  hideOnboarding();
+  unlockApp();
+  showPage("dashboard");
+  showToast("Серверный аккаунт создан");
+}
+
+async function loginRemoteAccount(login, password) {
+  const result = await apiRequest("/api/auth/login", {
+    method: "POST",
+    body: { login, password }
+  });
+  if (!applyRemoteEnvelope(result)) throw new Error("В аккаунте нет зашифрованной базы");
+  await openEncryptedProfile(password);
+  authErrorText = "";
+  hideOnboarding();
+  unlockApp();
+  showPage("dashboard");
+  await saveState();
+  showToast("Данные синхронизированы с сервера");
+}
+
+async function restoreRemoteSession() {
+  try {
+    const result = await apiRequest("/api/session");
+    if (!result.authenticated) {
+      resetToSignedOutState("");
+      return false;
+    }
+    applyRemoteEnvelope(result);
+    authErrorText = "";
+    return true;
+  } catch (error) {
+    resetToSignedOutState(error.message || "Сервер авторизации недоступен");
+    return false;
+  }
+}
+
+async function pullRemoteVault(silent = true) {
+  if (!currentUser?.id || !vaultKeyBytes) return false;
+  try {
+    const result = await apiRequest("/api/vault");
+    const vault = remoteVaultFromPayload(result);
+    if (!vault || Number(vault.revision || 0) <= remoteRevision) return false;
+    const decrypted = await decryptWithRawKey(vault.envelope, vaultKeyBytes);
+    remoteRevision = Number(vault.revision || remoteRevision);
+    state = prepareStateForRemote(decrypted);
+    pendingEncryptedProfile = null;
+    processRecurringOperations();
+    renderAll();
+    if (!silent) showToast("Данные обновлены с сервера");
+    return true;
+  } catch (error) {
+    if (!silent) showToast(error.message || "Не удалось получить данные с сервера");
+    return false;
+  }
+}
+
+async function logoutRemote() {
+  await saveState().catch(() => undefined);
+  await apiRequest("/api/auth/logout", { method: "POST" }).catch(() => undefined);
+  closeProfileMenu();
+  resetToSignedOutState("");
+  document.querySelector("#appLock").hidden = true;
+  releaseViewport("lock");
+  renderAll();
+  showPage("dashboard");
+  showOnboarding();
 }
 
 function renderAll() {
@@ -1966,7 +2428,7 @@ function showPage(pageId) {
   document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === pageId));
   document.querySelectorAll("[data-page]").forEach(button => button.classList.toggle("active", button.dataset.page === pageId));
   document.querySelector("#mobilePayments").classList.toggle("active", ["recurring", "debts", "calendar"].includes(pageId));
-  document.querySelector("#mobileMore").classList.toggle("active", ["accounts", "analytics", "settings"].includes(pageId));
+  document.querySelector("#mobileMore").classList.toggle("active", ["accounts", "analytics"].includes(pageId));
   document.querySelector("#eyebrow").textContent = pageMeta[pageId][0];
   document.querySelector("#pageTitle").textContent = pageId === "dashboard" && state.settings.name.trim()
     ? `Добрый день, ${state.settings.name.trim()}!`
@@ -1993,10 +2455,12 @@ function fillRecurringCategory(type, selected = "") {
 
 function fillAccountSelect(select, selectedId = "") {
   const current = selectedId || select.value || state.accounts[0]?.id || "";
-  select.innerHTML = state.accounts.map(account =>
+  const accounts = activeAccounts();
+  const options = accounts.length ? accounts : state.accounts;
+  select.innerHTML = options.map(account =>
     `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${money(accountBalance(account.id))}</option>`
   ).join("");
-  select.value = accountById(current) ? current : (state.accounts[0]?.id || "");
+  select.value = options.some(account => account.id === current) ? current : (options[0]?.id || "");
 }
 
 function fillAccountSelects() {
@@ -2075,9 +2539,11 @@ function openOperationModal(type, operation = null) {
 }
 
 function setAccountType(type) {
-  document.querySelector("#accountType").value = type;
+  const normalized = normalizeAccountType(type);
+  const pickerType = normalized === "current" ? "card" : normalized;
+  document.querySelector("#accountType").value = normalized;
   document.querySelectorAll("[data-account-type]").forEach(button => {
-    button.classList.toggle("active", button.dataset.accountType === type);
+    button.classList.toggle("active", button.dataset.accountType === pickerType);
   });
 }
 
@@ -2088,8 +2554,8 @@ function openAccountModal(account = null) {
   document.querySelector("#accountForm").hidden = false;
   document.querySelector("#accountId").value = account?.id || "";
   document.querySelector("#accountName").value = account?.name || "";
-  document.querySelector("#accountOpeningBalance").value = Number(account?.openingBalance || 0);
-  setAccountType(account?.type || "card");
+  document.querySelector("#accountOpeningBalance").value = Number(account ? initialBalanceAmount(account.id) : 0);
+  setAccountType(account?.type || "current");
   openModal();
   setTimeout(() => document.querySelector("#accountName").focus(), 100);
 }
@@ -2098,6 +2564,8 @@ function renderTransferPreview() {
   const fromId = document.querySelector("#transferFrom").value;
   const toId = document.querySelector("#transferTo").value;
   const amount = Number(document.querySelector("#transferAmount").value || 0);
+  const feeInput = document.querySelector("#transferFee");
+  const fee = feeInput ? Math.max(0, Number(feeInput.value || 0)) : 0;
   const preview = document.querySelector("#transferPreview");
   if (!fromId || !toId || fromId === toId) {
     preview.textContent = "Выберите два разных счёта";
@@ -2105,11 +2573,13 @@ function renderTransferPreview() {
   }
   const balance = accountBalance(fromId);
   preview.innerHTML = `Доступно на счёте «${escapeHtml(accountName(fromId))}»: <b class="sensitive">${money(balance)}</b>`
-    + (amount > balance ? `<br><span class="amount-expense">Не хватает ${money(amount - balance)}</span>` : "");
+    + (fee ? `<br>Комиссия: <b class="sensitive">${money(fee)}</b>` : "")
+    + (amount + fee > balance ? `<br><span class="amount-expense">Не хватает ${money(amount + fee - balance)}</span>` : "");
 }
 
 function openTransferModal() {
-  if (state.accounts.length < 2) {
+  const accounts = activeAccounts();
+  if (accounts.length < 2) {
     showToast("Для перевода добавьте второй счёт");
     openAccountModal();
     return;
@@ -2118,9 +2588,10 @@ function openTransferModal() {
   document.querySelector("#modalKicker").textContent = "МЕЖДУ СЧЕТАМИ";
   document.querySelector("#modalTitle").textContent = "Новый перевод";
   document.querySelector("#transferForm").hidden = false;
-  fillAccountSelect(document.querySelector("#transferFrom"), state.accounts[0].id);
-  fillAccountSelect(document.querySelector("#transferTo"), state.accounts[1].id);
+  fillAccountSelect(document.querySelector("#transferFrom"), accounts[0].id);
+  fillAccountSelect(document.querySelector("#transferTo"), accounts[1].id);
   document.querySelector("#transferAmount").value = "";
+  if (document.querySelector("#transferFee")) document.querySelector("#transferFee").value = 0;
   document.querySelector("#transferDate").value = isoToday();
   document.querySelector("#transferNote").value = "";
   renderTransferPreview();
@@ -2490,10 +2961,12 @@ document.addEventListener("click", event => {
   const mobileMoreMenu = document.querySelector("#mobileMoreMenu");
   if (quickAddButton) {
     mobileAddMenu.hidden = !mobileAddMenu.hidden;
+    quickAddButton.setAttribute("aria-expanded", String(!mobileAddMenu.hidden));
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
   } else if (!event.target.closest("#mobileAddMenu")) {
     mobileAddMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
   }
   if (mobilePaymentsButton) {
     mobilePaymentsMenu.hidden = !mobilePaymentsMenu.hidden;
@@ -2517,6 +2990,7 @@ document.addEventListener("click", event => {
     mobileAddMenu.hidden = true;
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     document.querySelector("#mobilePayments").setAttribute("aria-expanded", "false");
     document.querySelector("#mobileMore").setAttribute("aria-expanded", "false");
     closeDesktopAddMenu();
@@ -2531,6 +3005,7 @@ document.addEventListener("click", event => {
     mobileAddMenu.hidden = true;
     mobilePaymentsMenu.hidden = true;
     mobileMoreMenu.hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     closeDesktopAddMenu();
     const modalType = modalButton.dataset.openModal;
     if (modalType === "debt") openDebtModal();
@@ -2562,14 +3037,15 @@ document.addEventListener("click", event => {
     const id = deleteAccount.dataset.deleteAccount;
     const isUsed = state.operations.some(operation => operation.accountId === id)
       || state.recurring.some(item => item.accountId === id)
-      || state.transfers.some(transfer => transfer.fromAccountId === id || transfer.toAccountId === id);
+      || state.transfers.some(transfer => transfer.fromAccountId === id || transfer.toAccountId === id)
+      || state.cards.some(card => card.accountId === id);
     if (state.accounts.length === 1) {
       showToast("Нужен хотя бы один счёт");
     } else if (isUsed) {
       showToast("Счёт используется в операциях, переводах или расписании");
     } else if (confirm("Удалить этот счёт?")) {
       state.accounts = state.accounts.filter(account => account.id !== id);
-      state.settings.openingBalance = Number(state.accounts[0]?.openingBalance || 0);
+      state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
       saveState();
       renderAll();
       showToast("Счёт удалён");
@@ -2669,11 +3145,13 @@ document.querySelector("#modalBackdrop").addEventListener("click", event => {
 document.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     closeModal();
+    if (!document.querySelector("#registrationDialog").hidden) closeRegistrationDialog();
     closeDesktopAddMenu();
     closeProfileMenu();
     document.querySelector("#mobileAddMenu").hidden = true;
     document.querySelector("#mobilePaymentsMenu").hidden = true;
     document.querySelector("#mobileMoreMenu").hidden = true;
+    document.querySelector("#mobileQuickAdd").setAttribute("aria-expanded", "false");
     document.querySelector("#mobilePayments").setAttribute("aria-expanded", "false");
     document.querySelector("#mobileMore").setAttribute("aria-expanded", "false");
   }
@@ -2757,27 +3235,39 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
   event.preventDefault();
   const id = document.querySelector("#accountId").value || uid();
   const existing = accountById(id);
+  const initialBalance = Number(document.querySelector("#accountOpeningBalance").value || 0);
   const account = normalizeAccount({
     id,
     name: document.querySelector("#accountName").value.trim(),
     type: document.querySelector("#accountType").value,
-    openingBalance: Number(document.querySelector("#accountOpeningBalance").value || 0),
-    createdAt: existing?.createdAt || isoToday()
+    currency: existing?.currency || state.settings.currency || "₽",
+    bankName: existing?.bankName || "",
+    includeInTotal: existing?.includeInTotal !== false,
+    includeInSafetyFund: existing?.includeInSafetyFund === true,
+    allowNegativeBalance: existing?.allowNegativeBalance === true,
+    hideBalance: existing?.hideBalance === true,
+    isArchived: existing?.isArchived === true,
+    color: existing?.color || "",
+    icon: existing?.icon || "",
+    createdAt: existing?.createdAt || isoToday(),
+    updatedAt: isoToday()
   });
   const index = state.accounts.findIndex(item => item.id === id);
   if (index >= 0) state.accounts[index] = account;
   else state.accounts.push(account);
+  upsertInitialBalanceOperation(id, initialBalance, existing?.createdAt || account.createdAt || isoToday());
   state.operations.forEach(operation => {
     if (operation.accountId === id) operation.account = account.name;
   });
-  state.settings.openingBalance = Number(state.accounts[0]?.openingBalance || 0);
+  state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
   saveState();
   closeModal();
   renderAll();
   showToast(existing ? "Счёт обновлён" : "Счёт добавлен");
 });
 
-["transferFrom", "transferTo", "transferAmount"].forEach(id => {
+["transferFrom", "transferTo", "transferAmount", "transferFee"].forEach(id => {
+  if (!document.querySelector(`#${id}`)) return;
   document.querySelector(`#${id}`).addEventListener("input", renderTransferPreview);
   document.querySelector(`#${id}`).addEventListener("change", renderTransferPreview);
 });
@@ -2787,6 +3277,8 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
   const fromAccountId = document.querySelector("#transferFrom").value;
   const toAccountId = document.querySelector("#transferTo").value;
   const amount = Number(document.querySelector("#transferAmount").value || 0);
+  const feeInput = document.querySelector("#transferFee");
+  const fee = feeInput ? Math.max(0, Number(feeInput.value || 0)) : 0;
   if (fromAccountId === toAccountId) {
     showToast("Выберите два разных счёта");
     return;
@@ -2795,7 +3287,7 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     showToast("Введите сумму больше нуля");
     return;
   }
-  if (amount > accountBalance(fromAccountId)) {
+  if (amount + fee > accountBalance(fromAccountId)) {
     showToast("На счёте недостаточно денег");
     return;
   }
@@ -2804,8 +3296,10 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     fromAccountId,
     toAccountId,
     amount: roundMoney(amount),
+    fee: roundMoney(fee),
     date: document.querySelector("#transferDate").value,
-    note: document.querySelector("#transferNote").value.trim()
+    note: document.querySelector("#transferNote").value.trim(),
+    comment: document.querySelector("#transferNote").value.trim()
   });
   saveState();
   closeModal();
@@ -2876,11 +3370,35 @@ document.querySelector("#unlockForm").addEventListener("submit", async event => 
   const code = document.querySelector("#unlockCode").value;
   const submitButton = document.querySelector("#unlockForm button");
   submitButton.disabled = true;
+  if (pendingEncryptedProfile) {
+    try {
+      await openEncryptedProfile(code);
+      if (needsHashUpgrade(state.settings.passwordHash)) {
+        state.settings.passwordHash = await createSecretHash(code);
+        await saveState();
+      }
+      submitButton.disabled = false;
+      unlockApp();
+      showToast("Кабинет открыт и расшифрован");
+      return;
+    } catch (error) {
+      const failedGuard = recordFailedUnlock();
+      const lockoutSeconds = Math.max(0, Math.ceil((failedGuard.blockedUntil - Date.now()) / 1000));
+      document.querySelector("#lockError").textContent = failedGuard.blockedUntil > Date.now()
+        ? `Слишком много попыток. Вход заблокирован на ${lockoutSeconds} сек.`
+        : `Не удалось расшифровать базу. Осталось попыток: ${Math.max(0, UNLOCK_ATTEMPT_LIMIT - failedGuard.attempts)}.`;
+      document.querySelector("#unlockCode").value = "";
+      await new Promise(resolve => setTimeout(resolve, Math.min(1800, failedGuard.attempts * 300)));
+      submitButton.disabled = false;
+      document.querySelector("#unlockCode").focus();
+      return;
+    }
+  }
   let passwordMatches = false;
   let pinMatches = false;
   try {
     passwordMatches = await verifySecret(code, state.settings.passwordHash);
-    if (!passwordMatches && !pendingEncryptedProfile) {
+    if (!passwordMatches) {
       pinMatches = await verifySecret(code, state.settings.pinHash);
     }
   } catch (error) {
@@ -2890,9 +3408,7 @@ document.querySelector("#unlockForm").addEventListener("submit", async event => 
   if (passwordMatches || pinMatches) {
     try {
       let securityChanged = false;
-      if (pendingEncryptedProfile) {
-        await openEncryptedProfile(code);
-      } else if (!state.settings.encryptedAtRest) {
+      if (!state.settings.encryptedAtRest) {
         if (!passwordMatches) {
           document.querySelector("#lockError").textContent =
             "Для первого включения шифрования войдите по паролю.";
@@ -2911,7 +3427,6 @@ document.querySelector("#unlockForm").addEventListener("submit", async event => 
       if (securityChanged) await saveState();
       submitButton.disabled = false;
       unlockApp();
-      if (passwordMatches) { try { cloudSync.resume(code); } catch (_) { /* синхронизация продолжит позже */ } }
       showToast("Кабинет открыт");
       return;
     } catch (error) {
@@ -2946,7 +3461,7 @@ document.querySelector("#biometricUnlockButton").addEventListener("click", async
       document.querySelector("#lockError").textContent = "Не удалось подтвердить вход";
     }
   } catch (error) {
-    document.querySelector("#lockError").textContent = "Биометрическая проверка отменена или недоступна";
+    document.querySelector("#lockError").textContent = biometricErrorMessage(error);
   }
 });
 
@@ -3001,33 +3516,7 @@ document.querySelector("#removeBiometricButton").addEventListener("click", () =>
 });
 
 document.querySelector("#lockNowButton").addEventListener("click", lockApp);
-function logoutAccount() {
-  cloudSync.signOut();
-  // Локальный зашифрованный кэш убираем — данные остаются в облаке, вход снова через экран входа.
-  if (activeProfileId) {
-    try {
-      localStorage.removeItem(profileStorageKey(activeProfileId));
-      saveProfileRegistry(loadProfileRegistry().filter(profile => profile.id !== activeProfileId));
-      localStorage.removeItem(ACTIVE_PROFILE_KEY);
-    } catch (_) { /* хранилище недоступно */ }
-  }
-  activeProfileId = "";
-  vaultKeyBytes = null;
-  pendingEncryptedProfile = null;
-  appUnlocked = false;
-  document.querySelector("#appLock").hidden = true;
-  state = clone(DEFAULT_STATE);
-  authMode = "login";
-  renderAll();
-  showOnboarding();
-  showToast("Вы вышли из аккаунта");
-}
-
-document.querySelector("#profileLogoutButton").addEventListener("click", () => {
-  if (!confirm("Выйти из аккаунта? Данные останутся в облаке, войти можно снова с любого устройства.")) return;
-  closeProfileMenu();
-  logoutAccount();
-});
+document.querySelector("#profileLogoutButton").addEventListener("click", logoutRemote);
 document.querySelector("#profileSettingsButton").addEventListener("click", () => {
   closeProfileMenu();
   showPage("settings");
@@ -3094,7 +3583,7 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
   state.settings.email = document.querySelector("#userEmail").value.trim();
   state.settings.profileCreated = true;
   state.settings.openingBalance = Number(document.querySelector("#openingBalance").value || 0);
-  state.accounts[0].openingBalance = state.settings.openingBalance;
+  if (state.accounts[0]) upsertInitialBalanceOperation(state.accounts[0].id, state.settings.openingBalance, state.accounts[0].createdAt || isoToday());
   state.settings.reserveTarget = Number(document.querySelector("#reserveTarget").value || 0);
   state.settings.reserveSaved = Number(document.querySelector("#reserveSaved").value || 0);
   state.settings.currency = document.querySelector("#currency").value;
@@ -3103,50 +3592,142 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
   showToast("Настройки сохранены");
 });
 
-document.querySelector("#onboardingForm").addEventListener("submit", async event => {
-  event.preventDefault();
-  const email = document.querySelector("#onboardingEmail").value.trim();
-  const password = document.querySelector("#onboardingPassword").value;
-  const errorField = document.querySelector("#onboardingError");
+async function handleOnboardingAuth(action = AUTH_MODE_LOGIN) {
   const submitButton = document.querySelector("#onboardingSubmit");
-  const register = authMode === "register";
-  errorField.textContent = "";
-  if (!cloudSync.available()) {
-    errorField.textContent = "Серверная синхронизация не настроена.";
+  const createButton = document.querySelector("#existingAccountButton");
+  if (submitButton.disabled || createButton.disabled) return;
+  const email = normalizeEmail(document.querySelector("#onboardingLogin").value);
+  const password = document.querySelector("#onboardingPassword").value;
+  document.querySelector("#onboardingLogin").value = email;
+  if (!email) {
+    showToast("Введите электронную почту");
     return;
   }
-  submitButton.disabled = true;
-  try {
-    await cloudSync.enterAccount(email, password, register);
-    processRecurringOperations();
-    renderAll();
-    hideOnboarding();
-    unlockApp();
-    showPage("dashboard");
-    showToast(register ? "Аккаунт создан" : "С возвращением!");
-  } catch (error) {
-    if (error.code === "confirm_email") {
-      errorField.textContent = "Подтвердите почту по ссылке из письма, затем войдите.";
-    } else if (error.code === "unauthorized") {
-      errorField.textContent = register
-        ? "Такой аккаунт уже существует. Войдите."
-        : "Неверная почта или пароль.";
-    } else if (error.code === "offline") {
-      errorField.textContent = "Нет связи с сервером. Проверьте интернет.";
-    } else {
-      errorField.textContent = error.message || "Не удалось войти.";
-    }
-  } finally {
-    submitButton.disabled = false;
+  if (!isValidEmail(email)) {
+    showToast("Введите корректную электронную почту");
+    return;
   }
+  if (!isStrongPassword(password)) {
+    showToast("Пароль должен содержать минимум 8 символов, буквы и цифры");
+    return;
+  }
+  const buttons = [...document.querySelectorAll("#onboardingForm button")];
+  buttons.forEach(button => { button.disabled = true; });
+  authErrorText = "";
+  document.querySelector("#onboardingLocalNote").textContent = "Проверяем почту и расшифровываем зашифрованный сейф.";
+  submitButton.innerHTML = "Входим… <span>→</span>";
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    await loginRemoteAccount(email, password);
+  } catch (error) {
+    authErrorText = error.message || "Не удалось выполнить вход";
+    fillOnboarding();
+    showToast(authErrorText);
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    if (!document.querySelector("#onboarding").hidden) fillOnboarding();
+  }
+}
+
+function openRegistrationDialog() {
+  authErrorText = "";
+  document.querySelector("#registrationName").value = "";
+  document.querySelector("#registrationEmail").value = normalizeEmail(document.querySelector("#onboardingLogin").value);
+  document.querySelector("#registrationPassword").value = "";
+  document.querySelector("#registrationPasswordConfirm").value = "";
+  document.querySelector("#registrationNote").textContent = "Два аккаунта с одной почтой создать нельзя.";
+  document.querySelector("#registrationSubmit").innerHTML = "Создать защищённый аккаунт <span>→</span>";
+  document.querySelector("#registrationDialog").hidden = false;
+  setTimeout(() => {
+    const target = document.querySelector("#registrationName").value
+      ? document.querySelector("#registrationEmail")
+      : document.querySelector("#registrationName");
+    target.focus();
+  }, 80);
+}
+
+function closeRegistrationDialog() {
+  document.querySelector("#registrationDialog").hidden = true;
+  document.querySelector("#existingAccountButton").focus();
+}
+
+async function handleRegistrationSubmit() {
+  const name = document.querySelector("#registrationName").value.trim();
+  const email = normalizeEmail(document.querySelector("#registrationEmail").value);
+  const password = document.querySelector("#registrationPassword").value;
+  const confirmation = document.querySelector("#registrationPasswordConfirm").value;
+  const note = document.querySelector("#registrationNote");
+  const submitButton = document.querySelector("#registrationSubmit");
+  const buttons = [...document.querySelectorAll("#registrationForm button")];
+  document.querySelector("#registrationEmail").value = email;
+  if (!name) {
+    showToast("Введите имя");
+    document.querySelector("#registrationName").focus();
+    return;
+  }
+  if (!isValidEmail(email)) {
+    showToast("Введите корректную электронную почту");
+    document.querySelector("#registrationEmail").focus();
+    return;
+  }
+  if (!isStrongPassword(password)) {
+    showToast("Пароль должен содержать минимум 8 символов, буквы и цифры");
+    document.querySelector("#registrationPassword").focus();
+    return;
+  }
+  if (password !== confirmation) {
+    showToast("Пароли не совпадают");
+    document.querySelector("#registrationPasswordConfirm").focus();
+    return;
+  }
+  buttons.forEach(button => { button.disabled = true; });
+  submitButton.innerHTML = "Проверяем почту… <span>→</span>";
+  note.textContent = "Проверяем, свободна ли эта почта.";
+  await new Promise(resolve => setTimeout(resolve, 0));
+  try {
+    const availability = await checkEmailAvailability(email);
+    if (!availability.available) {
+      throw new Error("Аккаунт с такой почтой уже существует. Войдите или используйте другую почту.");
+    }
+    submitButton.innerHTML = "Создаём сейф… <span>→</span>";
+    note.textContent = "Почта свободна. Создаём зашифрованный сейф и серверный аккаунт.";
+    await registerRemoteAccount(email, password, name);
+  } catch (error) {
+    note.textContent = error.message || "Не удалось создать аккаунт";
+    showToast(note.textContent);
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    if (!document.querySelector("#registrationDialog").hidden) {
+      submitButton.innerHTML = "Создать защищённый аккаунт <span>→</span>";
+    }
+  }
+}
+
+document.querySelector("#onboardingSubmit").addEventListener("click", () => {
+  authMode = AUTH_MODE_LOGIN;
 });
 
-document.querySelector("#onboardingToggle").addEventListener("click", () => {
-  authMode = authMode === "register" ? "login" : "register";
-  fillOnboarding();
-  document.querySelector("#onboardingEmail").focus();
+document.querySelector("#existingAccountButton").addEventListener("click", () => {
+  authMode = AUTH_MODE_REGISTER;
+  openRegistrationDialog();
 });
-document.querySelector("#showOnboardingButton").addEventListener("click", showOnboarding);
+
+document.querySelector("#onboardingForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  await handleOnboardingAuth(event.submitter?.dataset.authAction || authMode || AUTH_MODE_LOGIN);
+});
+
+document.querySelector("#registrationForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  await handleRegistrationSubmit();
+});
+document.querySelector("#registrationClose").addEventListener("click", closeRegistrationDialog);
+document.querySelector("#registrationBackToLogin").addEventListener("click", closeRegistrationDialog);
+document.querySelector("#registrationDialog").addEventListener("click", event => {
+  if (event.target.id === "registrationDialog") closeRegistrationDialog();
+});
+document.querySelector("#onboardingClose").addEventListener("click", cancelOnboarding);
+document.querySelector("#showOnboardingButton").addEventListener("click", logoutRemote);
 
 document.querySelector("#autoLockMinutes").addEventListener("change", event => {
   state.settings.autoLockMinutes = Math.max(1, Number(event.target.value || 5));
@@ -3202,25 +3783,31 @@ document.querySelector("#importInput").addEventListener("change", event => {
   event.target.value = "";
 });
 document.querySelector("#resetButton").addEventListener("click", () => {
-  if (!confirm("Удалить все финансовые данные с этого устройства?")) return;
+  if (!confirm("Очистить финансовые данные в этом серверном аккаунте?")) return;
   if (!confirm("Это действие нельзя отменить. Продолжить?")) return;
-  loadProfileRegistry().forEach(profile => localStorage.removeItem(profileStorageKey(profile.id)));
-  localStorage.removeItem(PROFILE_REGISTRY_KEY);
-  localStorage.removeItem(ACTIVE_PROFILE_KEY);
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(LEGACY_KEY);
-  activeProfileId = "";
-  creatingNewProfile = false;
-  previousProfileId = "";
-  pendingEncryptedProfile = null;
-  vaultKeyBytes = null;
-  newProfileReturnState = null;
-  newProfileReturnVault = null;
-  newProfileReturnPending = null;
-  state = clone(DEFAULT_STATE);
+  const protectedSettings = {
+    login: state.settings.login,
+    passwordHash: state.settings.passwordHash,
+    pinHash: state.settings.pinHash,
+    biometricCredential: state.settings.biometricCredential,
+    autoLockMinutes: state.settings.autoLockMinutes,
+    lockOnHide: state.settings.lockOnHide,
+    encryptedAtRest: true,
+    vaultPasswordWrap: state.settings.vaultPasswordWrap,
+    vaultPinWrap: state.settings.vaultPinWrap,
+    name: state.settings.name,
+    avatar: state.settings.avatar,
+    profileCreated: true,
+    currency: state.settings.currency,
+    theme: state.settings.theme
+  };
+  state = hydrateState(clone(DEFAULT_STATE));
+  state.settings = { ...state.settings, ...protectedSettings };
+  purgeLegacyLocalAccounts();
+  saveState();
   renderAll();
   syncAccessState();
-  showToast("Все данные удалены");
+  showToast("Финансовые данные очищены и отправлены на сервер");
 });
 
 window.addEventListener("beforeinstallprompt", event => {
@@ -3251,7 +3838,9 @@ function refreshRecurringSchedules() {
   sendUpcomingNotifications();
 }
 
-window.setInterval(refreshRecurringSchedules, 60000);
+window.setInterval(() => {
+  pullRemoteVault(true).then(() => refreshRecurringSchedules());
+}, 60000);
 ["pointerdown", "keydown", "touchstart"].forEach(eventName => {
   document.addEventListener(eventName, () => {
     if (appUnlocked) lastActivityAt = Date.now();
@@ -3269,354 +3858,16 @@ document.addEventListener("visibilitychange", () => {
   }
   if (state.settings.lockOnHide !== false && hiddenAt && Date.now() - hiddenAt >= 15000) lockApp();
   hiddenAt = 0;
-  refreshRecurringSchedules();
+  pullRemoteVault(true).then(() => refreshRecurringSchedules());
 });
 
-// ===== Облачная синхронизация (Supabase, E2E) =====
-// Всё дополнительно и защищено try/catch: если модуль/конфиг недоступны,
-// приложение работает как прежде, полностью локально.
-const cloudSync = (() => {
-  const config = (typeof window !== "undefined" && window.KOPILKA_SYNC_CONFIG) || {};
-  let client = null;
-  try {
-    if (config.enabled && typeof KopilkaSync !== "undefined") client = KopilkaSync.createClient(config);
-  } catch (error) {
-    console.warn("Синхронизация недоступна", error);
-    client = null;
-  }
-
-  let session = null;   // {accessToken, refreshToken, expiresAt, userId, email}
-  let secret = null;    // пароль синхронизации, только в памяти
-  let meta = { email: "", version: 0, lastSyncedAt: 0 };
-  let busy = false;
-  let applying = false; // подавляет автопуш во время загрузки удалённых данных
-  let pushTimer = null;
-
-  function available() { return Boolean(client); }
-  function storageKey() { return `kopilka_sync_v1:${activeProfileId || "default"}`; }
-
-  function deviceId() {
-    try {
-      let id = localStorage.getItem("kopilka_device_id");
-      if (!id) { id = uid(); localStorage.setItem("kopilka_device_id", id); }
-      return id;
-    } catch (_) { return "web"; }
-  }
-
-  function loadMeta() {
-    session = null;
-    secret = null;
-    meta = { email: "", version: 0, lastSyncedAt: 0 };
-    try {
-      const raw = JSON.parse(localStorage.getItem(storageKey()) || "null");
-      if (raw && typeof raw === "object") {
-        meta = { email: raw.email || "", version: Number(raw.version || 0), lastSyncedAt: Number(raw.lastSyncedAt || 0) };
-        session = raw.session || null;
-      }
-    } catch (_) { /* без сохранённой сессии */ }
-  }
-
-  function persistMeta() {
-    try {
-      localStorage.setItem(storageKey(), JSON.stringify({
-        email: meta.email, version: meta.version, lastSyncedAt: meta.lastSyncedAt, session
-      }));
-    } catch (_) { /* хранилище недоступно */ }
-  }
-
-  function clearMeta() {
-    session = null; secret = null;
-    meta = { email: "", version: 0, lastSyncedAt: 0 };
-    try { localStorage.removeItem(storageKey()); } catch (_) { /* нечего чистить */ }
-  }
-
-  async function ensureToken() {
-    if (!session) throw new KopilkaSync.SyncError("Нет сессии", "unauthorized", 401);
-    if (session.refreshToken && session.expiresAt && Date.now() > session.expiresAt - 60000) {
-      const refreshed = await client.refresh(session.refreshToken);
-      session = { ...refreshed, email: meta.email };
-      persistMeta();
-    }
-    return session.accessToken;
-  }
-
-  function localHasData() {
-    return Boolean(
-      (state.operations || []).length || (state.debts || []).length
-      || (state.transfers || []).length || (state.recurring || []).length
-    );
-  }
-
-  async function applyRemote(remote) {
-    const key = await unwrapVaultKey(remote.keyWrap, secret);
-    const data = await decryptWithRawKey(remote.ciphertext, key);
-    applying = true;
-    try {
-      state = hydrateState(migrateData(data));
-      meta.version = remote.version;
-      meta.lastSyncedAt = Date.now();
-      persistMeta();
-      await saveState();
-    } finally {
-      applying = false;
-    }
-    processRecurringOperations();
-    renderAll();
-  }
-
-  async function pushNow() {
-    const token = await ensureToken();
-    const key = randomBytes(32);
-    const ciphertext = await encryptWithRawKey(clone(state), key);
-    const keyWrap = await wrapVaultKey(key, secret);
-    const result = await client.pushVault(token, {
-      ciphertext, keyWrap, baseVersion: meta.version, deviceId: deviceId()
-    });
-    meta.version = result.version;
-    meta.lastSyncedAt = Date.now();
-    persistMeta();
-  }
-
-  // Вход/регистрация как единственный способ попасть в приложение.
-  // Загружает хранилище аккаунта с сервера (или заводит пустое) и настраивает
-  // локальное шифрование этого устройства. Бросает SyncError при ошибке.
-  async function enterAccount(email, password, create) {
-    if (!available()) throw new KopilkaSync.SyncError("Синхронизация не настроена", "not_configured");
-    email = String(email || "").trim().toLowerCase();
-    if (!email || !password) throw new KopilkaSync.SyncError("Введите почту и пароль", "input");
-    if (create && !isStrongPassword(password)) {
-      throw new KopilkaSync.SyncError("Пароль: минимум 8 символов, буквы и цифры", "weak");
-    }
-
-    const authKey = await deriveAuthKey(password, email);
-    let established;
-    if (create) {
-      const res = await client.signUp(email, authKey);
-      if (res.needsConfirmation) throw new KopilkaSync.SyncError("confirm_email", "confirm_email");
-      established = res.session;
-    } else {
-      established = await client.signIn(email, authKey);
-    }
-
-    session = { ...established, email };
-    secret = password;
-    meta.email = email;
-    activeProfileId = session.userId || uid();
-
-    const token = await ensureToken();
-    const remote = await client.pullVault(token);
-    if (remote) {
-      const key = await unwrapVaultKey(remote.keyWrap, password);
-      const data = await decryptWithRawKey(remote.ciphertext, key);
-      state = hydrateState(migrateData(data));
-      meta.version = remote.version;
-    } else {
-      state = hydrateState(clone(DEFAULT_STATE));
-      meta.version = 0;
-    }
-
-    // Локальный кэш шифруется собственным ключом устройства, обёрнутым паролем.
-    vaultKeyBytes = randomBytes(32);
-    pendingEncryptedProfile = null;
-    state.settings.email = email;
-    state.settings.login = email;
-    if (!state.settings.name) state.settings.name = email.split("@")[0];
-    state.settings.encryptedAtRest = true;
-    state.settings.vaultPasswordWrap = await wrapVaultKey(vaultKeyBytes, password);
-    // Хеш пароля нужен локальному экрану разблокировки после перезапуска (офлайн-вход).
-    state.settings.passwordHash = await createSecretHash(password);
-    state.settings.profileCreated = true;
-    meta.lastSyncedAt = Date.now();
-    persistMeta();
-
-    await saveState();
-    if (!remote) await pushNow();
-    return { email };
-  }
-
-  function schedulePush() {
-    if (!available() || !session || !secret || applying) return;
-    clearTimeout(pushTimer);
-    pushTimer = setTimeout(() => {
-      pushNow().then(renderCard).catch(error => {
-        if (error.code === "conflict") return syncNow();
-        if (error.code === "unauthorized") { showToast("Войдите в облако заново"); localSignOut(); }
-        console.warn("Автосинхронизация не удалась", error);
-      });
-    }, 2500);
-  }
-
-  async function authenticate(email, password, create) {
-    if (!available()) { showToast("Синхронизация не настроена"); return; }
-    email = String(email || "").trim().toLowerCase();
-    if (!email || !password) { showToast("Введите почту и пароль"); return; }
-    if (create && !isStrongPassword(password)) {
-      showToast("Пароль: минимум 8 символов, буквы и цифры");
-      return;
-    }
-    busy = true; renderCard();
-    try {
-      const authKey = await deriveAuthKey(password, email);
-      let established;
-      if (create) {
-        const res = await client.signUp(email, authKey);
-        if (res.needsConfirmation) {
-          showToast("Подтвердите почту по ссылке из письма, затем войдите");
-          return;
-        }
-        established = res.session;
-      } else {
-        established = await client.signIn(email, authKey);
-      }
-      session = { ...established, email };
-      secret = password;
-      meta.email = email;
-      persistMeta();
-
-      const token = await ensureToken();
-      const remote = await client.pullVault(token);
-      if (remote) {
-        if (!localHasData() || confirm("В облаке найдены данные. Загрузить их на это устройство? Текущие локальные данные будут заменены.")) {
-          await applyRemote(remote);
-          showToast("Данные загружены из облака");
-        } else {
-          await pushNow();
-          showToast("Локальные данные выгружены в облако");
-        }
-      } else {
-        await pushNow();
-        showToast("Синхронизация включена");
-      }
-    } catch (error) {
-      if (error.code === "unauthorized") showToast("Неверная почта или пароль");
-      else if (error.code === "offline") showToast("Нет связи с сервером");
-      else showToast(error.message || "Не удалось войти");
-      if (!session) clearMeta();
-    } finally {
-      busy = false; renderCard();
-    }
-  }
-
-  async function syncNow() {
-    if (!available() || !session) return;
-    if (!secret) {
-      showToast("Введите пароль синхронизации");
-      renderCard();
-      const field = document.querySelector("#syncPassword");
-      if (field) { document.querySelector("#syncEmail").value = meta.email; field.focus(); }
-      return;
-    }
-    busy = true; renderCard();
-    try {
-      const token = await ensureToken();
-      const remote = await client.pullVault(token);
-      if (remote && remote.version > meta.version) {
-        await applyRemote(remote);
-        showToast("Загружены изменения с другого устройства");
-      } else {
-        await pushNow();
-        showToast("Синхронизировано");
-      }
-    } catch (error) {
-      if (error.code === "conflict") {
-        try {
-          const token = await ensureToken();
-          const remote = await client.pullVault(token);
-          if (remote) { await applyRemote(remote); showToast("Загружены изменения с другого устройства"); }
-        } catch (_) { showToast("Не удалось разрешить конфликт"); }
-      } else if (error.code === "unauthorized") { showToast("Войдите в облако заново"); localSignOut(); }
-      else if (error.code === "offline") { showToast("Нет связи с сервером"); }
-      else { showToast(error.message || "Ошибка синхронизации"); }
-    } finally {
-      busy = false; renderCard();
-    }
-  }
-
-  function localSignOut() {
-    if (session && client) { try { client.signOut(session.accessToken); } catch (_) { /* игнор */ } }
-    clearMeta();
-    renderCard();
-  }
-
-  // Возобновление сессии после локальной разблокировки паролем (перезапуск/офлайн-вход).
-  // Пароль совпал с локальным хешем, значит им же можно продолжить синхронизацию.
-  function resume(password) {
-    if (!available() || !session) { renderCard(); return; }
-    secret = password;
-    renderCard();
-    syncNow().catch(() => { /* фоновая досинхронизация не критична */ });
-  }
-
-  function formatSynced(ts) {
-    if (!ts) return "Ещё не синхронизировано";
-    return `Последняя синхронизация: ${formatDate(new Date(ts).toISOString().slice(0, 10))}`;
-  }
-
-  function renderCard() {
-    const card = document.querySelector("#syncCard");
-    if (!card) return;
-    if (!available()) { card.hidden = true; return; }
-    card.hidden = false;
-
-    const signedIn = Boolean(session);
-    const authForm = document.querySelector("#syncAuthForm");
-    const signedBlock = document.querySelector("#syncSignedIn");
-    const dot = document.querySelector("#syncStatusDot");
-    const title = document.querySelector("#syncStatusTitle");
-    const text = document.querySelector("#syncStatusText");
-
-    authForm.hidden = signedIn && Boolean(secret);
-    signedBlock.hidden = !signedIn;
-    dot.classList.toggle("active", signedIn && Boolean(secret));
-
-    if (!signedIn) {
-      title.textContent = busy ? "Подключение…" : "Не подключено";
-      text.textContent = "Войдите, чтобы данные были на всех устройствах";
-      if (meta.email) document.querySelector("#syncEmail").value = meta.email;
-    } else {
-      title.textContent = busy ? "Синхронизация…" : (secret ? "Подключено" : "Нужен пароль");
-      text.textContent = secret
-        ? formatSynced(meta.lastSyncedAt)
-        : "Введите пароль синхронизации, чтобы продолжить";
-      document.querySelector("#syncAccountEmail").textContent = meta.email || session.email || "—";
-      document.querySelector("#syncLastSynced").textContent = formatSynced(meta.lastSyncedAt);
-      document.querySelector("#syncNowButton").disabled = busy;
-    }
-  }
-
-  function init() {
-    loadMeta();
-    renderCard();
-  }
-
-  return {
-    available, init, renderCard, schedulePush, syncNow, enterAccount, resume,
-    hasSession: () => Boolean(session),
-    currentEmail: () => meta.email,
-    signIn: (email, password) => authenticate(email, password, false),
-    signUp: (email, password) => authenticate(email, password, true),
-    signOut: localSignOut
-  };
-})();
-
-if (cloudSync.available()) {
-  document.querySelector("#syncAuthForm").addEventListener("submit", event => {
-    event.preventDefault();
-    cloudSync.signIn(document.querySelector("#syncEmail").value, document.querySelector("#syncPassword").value);
-  });
-  document.querySelector("#syncSignUpButton").addEventListener("click", () => {
-    cloudSync.signUp(document.querySelector("#syncEmail").value, document.querySelector("#syncPassword").value);
-  });
-  document.querySelector("#syncNowButton").addEventListener("click", () => cloudSync.syncNow());
-  document.querySelector("#syncSignOutButton").addEventListener("click", () => {
-    if (!confirm("Выйти из аккаунта? Данные останутся в облаке.")) return;
-    logoutAccount();
-  });
+async function initializeApp() {
+  const initialPage = location.hash.slice(1);
+  await restoreRemoteSession();
+  processRecurringOperations();
+  renderAll();
+  showPage(pageMeta[initialPage] ? initialPage : "dashboard");
+  syncAccessState();
 }
 
-const initialPage = location.hash.slice(1);
-processRecurringOperations();
-renderAll();
-cloudSync.init();
-showPage(pageMeta[initialPage] ? initialPage : "dashboard");
-syncAccessState();
+initializeApp();

@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://*.supabase.co; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
-  <meta name="theme-color" content="#6c5ce7">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <meta name="theme-color" content="#3f5961">
   <meta name="description" content="Личный финансовый помощник: доходы, расходы, цели и долги в одном месте.">
   <title>Копилка — личные финансы</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=36">
 </head>
 <body>
   <section class="app-lock" id="appLock">
@@ -21,16 +21,17 @@
       <h1>Копилка закрыта</h1>
       <p id="lockGreeting">Введите пароль или PIN-код, чтобы открыть финансовые данные.</p>
       <form id="unlockForm">
-        <label>Пароль или PIN<input id="unlockCode" type="password" inputmode="text" autocomplete="current-password" placeholder="Введите код" required></label>
+        <label><span id="unlockMethodLabel">Пароль или PIN</span><input id="unlockCode" type="password" inputmode="text" autocomplete="current-password" placeholder="Введите код" required></label>
         <button class="button primary wide" type="submit">Открыть кабинет</button>
       </form>
       <button class="button biometric-unlock wide" id="biometricUnlockButton" hidden>◉ Войти по биометрии</button>
+      <small class="biometric-lock-hint" id="biometricLockHint"></small>
       <div class="lock-profile-switch" id="lockProfileSwitch" hidden>
         <small>ВОЙТИ В ДРУГОЙ АККАУНТ</small>
         <div id="lockProfileList"></div>
       </div>
       <small class="lock-error" id="lockError" role="alert"></small>
-      <small class="lock-note">Данные остаются на этом устройстве и скрыты до разблокировки.</small>
+      <small class="lock-note">Данные хранятся в серверной базе в зашифрованном виде и скрыты до разблокировки.</small>
     </div>
   </section>
 
@@ -45,8 +46,8 @@
         <h1>Возьмите финансы<br>под свой контроль</h1>
         <p>Доходы, расходы, кредиты и платёжный календарь — в одном приватном пространстве.</p>
         <div class="onboarding-benefits">
-          <span><i>✓</i>Данные на всех ваших устройствах</span>
-          <span><i>✓</i>Сквозное шифрование финансов</span>
+          <span><i>✓</i>Синхронизация между устройствами</span>
+          <span><i>✓</i>Зашифрованная серверная база</span>
           <span><i>✓</i>Никаких банковских паролей</span>
         </div>
       </div>
@@ -54,15 +55,31 @@
     </div>
     <div class="onboarding-panel">
       <form class="onboarding-form" id="onboardingForm">
+        <button class="onboarding-close" id="onboardingClose" type="button" hidden>← Вернуться в кабинет</button>
         <span class="kicker purple">ДОБРО ПОЖАЛОВАТЬ</span>
-        <h2 id="onboardingTitle">Вход в Копилку</h2>
-        <p id="onboardingIntro">Войдите в аккаунт, чтобы ваши финансы были доступны на всех устройствах.</p>
-        <label>Электронная почта<input id="onboardingEmail" type="email" autocomplete="email" placeholder="name@example.ru" required></label>
-        <label>Пароль<input id="onboardingPassword" type="password" autocomplete="current-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
-        <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit">Войти <span>→</span></button>
-        <button class="button ghost wide" id="onboardingToggle" type="button">Нет аккаунта? Зарегистрироваться</button>
-        <small class="lock-error" id="onboardingError" role="alert"></small>
-        <div class="onboarding-privacy"><i>●</i><span><b>Сквозное шифрование</b><small>Финансы шифруются на устройстве. Сервер хранит только зашифрованный файл и не может их прочитать.</small></span></div>
+        <h2 id="onboardingTitle">Войдите в личный кабинет</h2>
+        <p id="onboardingIntro">Введите электронную почту и пароль. Данные подтянутся с сервера на любом вашем устройстве.</p>
+        <label>Электронная почта<input id="onboardingLogin" type="email" inputmode="email" autocomplete="username" placeholder="name@example.com" required></label>
+        <label>Пароль<input id="onboardingPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
+        <button class="button primary wide onboarding-submit" id="onboardingSubmit" type="submit" data-auth-action="login">Войти <span>→</span></button>
+        <button class="button secondary wide onboarding-existing" id="existingAccountButton" type="button" data-auth-action="register">Создать новый аккаунт</button>
+        <small class="onboarding-local-note" id="onboardingLocalNote">Старые локальные кабинеты отключены: вход и синхронизация теперь идут через сервер.</small>
+        <div class="onboarding-privacy"><i>●</i><span><b>Приватная регистрация</b><small>Суммы и финансовые записи отправляются в базу только как зашифрованный сейф.</small></span></div>
+      </form>
+    </div>
+    <div class="registration-dialog" id="registrationDialog" role="dialog" aria-modal="true" aria-labelledby="registrationTitle" hidden>
+      <form class="registration-card" id="registrationForm">
+        <button class="registration-close" id="registrationClose" type="button" aria-label="Закрыть регистрацию">×</button>
+        <span class="kicker purple">НОВЫЙ АККАУНТ</span>
+        <h2 id="registrationTitle">Создать личный кабинет</h2>
+        <p>Почта будет вашим уникальным логином. Имя можно будет изменить в настройках.</p>
+        <label>Ваше имя<input id="registrationName" autocomplete="name" placeholder="Например, Иван" required></label>
+        <label>Электронная почта<input id="registrationEmail" type="email" inputmode="email" autocomplete="username" placeholder="name@example.com" required></label>
+        <label>Пароль<input id="registrationPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
+        <label>Повторите пароль<input id="registrationPasswordConfirm" type="password" autocomplete="new-password" minlength="8" placeholder="Ещё раз" required></label>
+        <small class="registration-note" id="registrationNote">Два аккаунта с одной почтой создать нельзя.</small>
+        <button class="button primary wide" id="registrationSubmit" type="submit">Создать защищённый аккаунт <span>→</span></button>
+        <button class="button secondary wide" id="registrationBackToLogin" type="button">Уже есть аккаунт</button>
       </form>
     </div>
   </section>
@@ -80,14 +97,14 @@
       </a>
 
       <nav class="main-nav" aria-label="Основная навигация">
-        <button class="nav-link active" data-page="dashboard"><span>⌂</span>Обзор</button>
-        <button class="nav-link" data-page="operations"><span>↕</span>Операции</button>
-        <button class="nav-link" data-page="recurring"><span>↻</span>Регулярные</button>
-        <button class="nav-link" data-page="accounts"><span>▣</span>Счета</button>
-        <button class="nav-link" data-page="debts"><span>◎</span>Долги</button>
-        <button class="nav-link" data-page="calendar"><span>▦</span>Календарь</button>
-        <button class="nav-link" data-page="analytics"><span>⌁</span>Аналитика</button>
-        <button class="nav-link" data-page="settings"><span>⚙</span>Настройки</button>
+        <button class="nav-link active" data-page="dashboard"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5h6.5v6H4zM13.5 5.5H20v13h-6.5zM4 14.5h6.5v4H4z"/></svg></span>Обзор</button>
+        <button class="nav-link" data-page="operations"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3"/></svg></span>Операции</button>
+        <button class="nav-link" data-page="recurring"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7.5h-4.5V3m4.1 4.4A8 8 0 0 0 6.2 5.7M4 16.5h4.5V21m-4.1-4.4a8 8 0 0 0 13.4 1.7"/></svg></span>Регулярные</button>
+        <button class="nav-link" data-page="accounts"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v10H4zM4 10h16M7 14h3m6 0h1"/></svg></span>Счета</button>
+        <button class="nav-link" data-page="debts"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h10l2 2v15l-3-1.5-2.5 1.5L11 19l-2.5 1.5L5 19V5.5zM8.5 8h7M8.5 12h7M8.5 16h4"/></svg></span>Долги</button>
+        <button class="nav-link" data-page="calendar"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5h14v13H5zM8 3.5v5m8-5v5M5 10h14M8.5 14h2.5m2 0h2.5"/></svg></span>Календарь</button>
+        <button class="nav-link" data-page="analytics"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19h16M6.5 15.5l4-4 3 3L18 8m0 0h-4m4 0v4"/></svg></span>Аналитика</button>
+        <button class="nav-link" data-page="settings"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 7h14M8 7a2 2 0 1 0 4 0 2 2 0 0 0-4 0ZM5 17h14m-7 0a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z"/></svg></span>Настройки</button>
       </nav>
 
       <div class="side-goal">
@@ -98,7 +115,7 @@
 
       <div class="sidebar-foot">
         <span class="privacy-dot"></span>
-        <span><b>Приватно</b><small>данные только на устройстве</small></span>
+        <span><b>Приватно</b><small>суммы зашифрованы в базе</small></span>
       </div>
     </aside>
 
@@ -136,10 +153,10 @@
                 <div><b id="profileMenuName">Пользователь</b><small id="profileMenuLogin">@user</small></div>
               </div>
               <input id="profileAvatarInput" type="file" accept="image/*" hidden>
-              <div class="profile-accounts" id="profileAccountsSection" hidden>
-                <small class="profile-section-label">АККАУНТЫ НА УСТРОЙСТВЕ</small>
+              <div class="profile-accounts">
+                <small class="profile-section-label">СЕРВЕРНЫЙ АККАУНТ</small>
                 <div class="profile-list" id="profileList"></div>
-                <button class="profile-action profile-add-account" id="addProfileButton" type="button"><span>＋</span><b>Добавить аккаунт</b></button>
+                <button class="profile-action profile-add-account" id="addProfileButton" type="button"><span>⇄</span><b>Сменить аккаунт</b></button>
               </div>
               <div class="profile-menu-separator"></div>
               <button class="profile-action" id="profileRemindersButton" type="button"><span>♢</span><b>Напоминания</b><em id="profileReminderBadge" hidden>0</em></button>
@@ -440,7 +457,7 @@
               <span><i class="status-dot active" id="passwordStatusDot"></i><b>Пароль</b><small id="passwordStatusText">Включён при регистрации</small></span>
               <span><i class="status-dot" id="pinStatusDot"></i><b>PIN-код</b><small id="pinStatusText">Не настроен</small></span>
               <span><i class="status-dot" id="biometricStatusDot"></i><b>Биометрия</b><small id="biometricStatusText">Не настроена</small></span>
-              <span><i class="status-dot" id="storageEncryptionStatusDot"></i><b>Локальная база</b><small id="storageEncryptionStatusText">Проверка защиты…</small></span>
+              <span><i class="status-dot" id="storageEncryptionStatusDot"></i><b>Серверная база</b><small id="storageEncryptionStatusText">Проверка защиты…</small></span>
             </div>
             <form id="pinForm" class="pin-form">
               <label>Новый PIN<input id="securityPin" type="password" inputmode="numeric" pattern="[0-9]{4,6}" minlength="4" maxlength="6" placeholder="4–6 цифр" required></label>
@@ -473,37 +490,13 @@
             <div class="data-action"><span class="stat-icon lilac">⇩</span><div><b>Скачать копию</b><small>Зашифровать паролем перед сохранением</small></div><button class="button secondary small" id="exportButton">Скачать</button></div>
             <label class="data-action"><span class="stat-icon sky">⇧</span><div><b>Загрузить копию</b><small>Поддерживаются защищённые и старые копии</small></div><span class="button secondary small">Выбрать</span><input type="file" id="importInput" accept=".kopilka,.json,application/json,application/octet-stream" hidden></label>
             <div class="data-action"><span class="stat-icon mint">✓</span><div><b>Формат данных</b><small id="schemaVersionText">Версия —</small></div><span class="count-label">Авто</span></div>
-            <div class="data-action danger-zone"><span class="stat-icon coral">×</span><div><b>Очистить данные</b><small>Удалить всё с устройства</small></div><button class="button danger small" id="resetButton">Очистить</button></div>
-            <div class="data-action"><span class="stat-icon sunshine">◉</span><div><b>Стартовый экран</b><small>Посмотреть или изменить профиль</small></div><button class="button secondary small" id="showOnboardingButton">Открыть</button></div>
+            <div class="data-action danger-zone"><span class="stat-icon coral">×</span><div><b>Очистить данные</b><small>Очистить финансовые записи в аккаунте</small></div><button class="button danger small" id="resetButton">Очистить</button></div>
+            <div class="data-action"><span class="stat-icon sunshine">◉</span><div><b>Сменить аккаунт</b><small>Выйти и войти под другой почтой</small></div><button class="button secondary small" id="showOnboardingButton">Сменить</button></div>
             <button class="install-card" id="installButton" hidden>
               <span class="install-icon">⬇</span>
-              <span><b>Установить «Копилку»</b><small>Работает как отдельное приложение и доступна офлайн</small></span>
+              <span><b>Установить «Копилку»</b><small>Открывается как отдельное приложение, синхронизация требует интернет</small></span>
               <i>→</i>
             </button>
-          </article>
-
-          <article class="card sync-card" id="syncCard" hidden>
-            <div class="card-title-row"><div><span class="kicker">ОБЛАКО</span><h2>Синхронизация</h2></div><span class="security-shield">☁</span></div>
-            <div class="security-status">
-              <span><i class="status-dot" id="syncStatusDot"></i><b id="syncStatusTitle">Не подключено</b><small id="syncStatusText">Войдите, чтобы данные были на всех устройствах</small></span>
-            </div>
-
-            <form id="syncAuthForm" class="sync-form">
-              <label>Электронная почта<input id="syncEmail" type="email" autocomplete="email" placeholder="name@example.ru" required></label>
-              <label>Пароль синхронизации<input id="syncPassword" type="password" autocomplete="current-password" minlength="8" placeholder="Минимум 8 символов: буквы и цифры" required></label>
-              <div class="sync-actions">
-                <button class="button primary" type="submit" id="syncSignInButton">Войти</button>
-                <button class="button secondary" type="button" id="syncSignUpButton">Создать аккаунт</button>
-              </div>
-              <small class="security-hint">Финансы шифруются на устройстве до отправки. Сервер видит только зашифрованный файл. Пароль синхронизации восстановить нельзя — забудете, данные в облаке не расшифровать.</small>
-            </form>
-
-            <div id="syncSignedIn" class="sync-signed-in" hidden>
-              <div class="data-action"><span class="stat-icon sky">☁</span><div><b id="syncAccountEmail">—</b><small id="syncLastSynced">Ещё не синхронизировано</small></div><button class="button secondary small" id="syncNowButton">Синхронизировать</button></div>
-              <div class="sync-actions">
-                <button class="button secondary small" id="syncSignOutButton">Выйти из облака</button>
-              </div>
-            </div>
           </article>
         </div>
       </section>
@@ -513,8 +506,8 @@
   <nav class="bottom-nav" aria-label="Мобильная навигация">
     <button class="active nav-dashboard" data-page="dashboard"><span><svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5M5.5 10v9h13v-9M9 19v-5h6v5"/></svg></span>Обзор</button>
     <button class="nav-operations" data-page="operations"><span><svg viewBox="0 0 24 24"><path d="M7 4v16m0-16-3 3m3-3 3 3m7 13V4m0 16-3-3m3 3 3-3"/></svg></span>Операции</button>
-    <button class="quick-add" id="mobileQuickAdd" aria-label="Добавить операцию">＋</button>
-    <button class="nav-payments" id="mobilePayments" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><path d="M4 6.5h16v13H4zM8 3.5v5m8-5v5M4 10h16M8 14h2m4 0h2"/></svg></span>Платежи</button>
+    <button class="quick-add" id="mobileQuickAdd" aria-label="Добавить операцию" aria-expanded="false">＋</button>
+    <button class="nav-payments" id="mobilePayments" type="button" aria-label="Открыть план платежей" aria-expanded="false"><span><svg viewBox="0 0 24 24"><path d="M4 6.5h16v13H4zM8 3.5v5m8-5v5M4 10h16M8 14h2m4 0h2"/></svg></span>План</button>
     <button class="nav-more" id="mobileMore" type="button" aria-expanded="false"><span><svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span>Ещё</button>
   </nav>
   <div class="mobile-add-menu" id="mobileAddMenu" hidden>
@@ -531,7 +524,6 @@
   <div class="mobile-group-menu mobile-more-menu" id="mobileMoreMenu" hidden>
     <button data-page="accounts"><span class="sky">▣</span><b>Счета</b><small>Карты и наличные</small></button>
     <button data-page="analytics"><span class="lilac">⌁</span><b>Аналитика</b><small>Прогнозы и отчёты</small></button>
-    <button data-page="settings"><span class="neutral">⚙</span><b>Настройки</b><small>Профиль и безопасность</small></button>
   </div>
 
   <div class="modal-backdrop" id="modalBackdrop" aria-hidden="true">
@@ -626,6 +618,7 @@
           <label>Со счёта<select id="transferFrom" required></select></label>
           <label>На счёт<select id="transferTo" required></select></label>
           <label>Сумма<input id="transferAmount" type="number" min="0.01" step="0.01" required></label>
+          <label>Комиссия<input id="transferFee" type="number" min="0" step="0.01" value="0"></label>
           <label>Дата<input id="transferDate" type="date" required></label>
           <label class="form-wide">Комментарий<input id="transferNote" placeholder="Необязательно"></label>
         </div>
@@ -662,11 +655,9 @@
   </div>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="sync-config.js"></script>
   <script src="modules/migrations.js"></script>
   <script src="modules/finance.js"></script>
   <script src="modules/security.js"></script>
-  <script src="modules/sync.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=37"></script>
 </body>
 </html>

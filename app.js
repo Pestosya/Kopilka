@@ -32,7 +32,8 @@ const {
   encryptWithRawKey,
   decryptWithRawKey,
   wrapVaultKey,
-  unwrapVaultKey
+  unwrapVaultKey,
+  preserveVaultSecuritySettings
 } = KopilkaSecurity;
 
 const DEFAULT_STATE = {
@@ -113,6 +114,8 @@ let vaultKeyBytes = null;
 let persistenceQueue = Promise.resolve();
 let state = loadState();
 let operationFilter = "all";
+let accountFilter = "all";
+let accountActivityFilter = "all";
 let privacyMode = false;
 let installPrompt = null;
 let toastTimer = null;
@@ -192,11 +195,15 @@ function formatDate(value, short = false) {
     : { day: "numeric", month: "long", year: "numeric" });
 }
 
-function money(value, compact = false) {
+function moneyInCurrency(value, currency = state.settings.currency, compact = false) {
   return `${new Intl.NumberFormat("ru-RU", {
     maximumFractionDigits: compact ? 0 : 2,
     minimumFractionDigits: 0
-  }).format(Number(value) || 0)} ${state.settings.currency}`;
+  }).format(Number(value) || 0)} ${currency || state.settings.currency}`;
+}
+
+function money(value, compact = false) {
+  return moneyInCurrency(value, state.settings.currency, compact);
 }
 
 function plural(number, forms) {
@@ -360,7 +367,8 @@ function normalizeTransferRecord(item) {
     fee: Math.max(0, Number(item?.fee || 0)),
     date: item?.date || isoToday(),
     note: item?.note || item?.comment || "",
-    comment: item?.comment || item?.note || ""
+    comment: item?.comment || item?.note || "",
+    createdAt: item?.createdAt || item?.date || isoToday()
   };
 }
 
@@ -823,7 +831,7 @@ async function openEncryptedProfile(password) {
   if (!wrapper) throw new Error("VAULT_KEY_MISSING");
   const key = await unwrapVaultKey(wrapper, password);
   const decrypted = await decryptWithRawKey(pendingEncryptedProfile, key);
-  state = hydrateState(migrateData(decrypted));
+  state = preserveVaultSecuritySettings(hydrateState(migrateData(decrypted)), wrapper);
   state = prepareStateForRemote(state);
   vaultKeyBytes = key;
   pendingEncryptedProfile = null;
@@ -1115,9 +1123,15 @@ function accountIcon(type) {
   return "▣";
 }
 
+function accountDisplayIcon(account) {
+  return account?.icon || accountIcon(account?.type);
+}
+
 function accountVisualClass(type) {
   if (type === "cash") return "cash";
   if (type === "savings" || type === "deposit") return "savings";
+  if (type === "wallet") return "wallet";
+  if (type === "credit") return "credit";
   return "card";
 }
 
@@ -1137,6 +1151,32 @@ function cardDisplayName(card) {
   return card.name && card.name !== "Карта" ? `${card.name} · ${digits}` : digits;
 }
 
+function cardNumberLabel(card) {
+  return card?.lastFourDigits ? `•••• ${card.lastFourDigits}` : "Карта без номера";
+}
+
+function cardPaymentSystemName(value) {
+  return {
+    mir: "МИР",
+    visa: "Visa",
+    mastercard: "Mastercard",
+    unionpay: "UnionPay",
+    other: "Другая"
+  }[value] || "Другая";
+}
+
+function cardTypeName(value) {
+  return value === "credit" ? "Кредитная" : "Дебетовая";
+}
+
+function cardFormatName(card) {
+  return card?.isVirtual ? "Виртуальная" : "Физическая";
+}
+
+function accountColorClass(value) {
+  return ["purple", "blue", "mint", "coral", "yellow"].includes(value) ? value : "";
+}
+
 function accountBalance(id) {
   const account = accountById(id);
   return calculateAccountBalance(account, state.operations, state.transfers);
@@ -1144,6 +1184,57 @@ function accountBalance(id) {
 
 function totalAccountsBalance() {
   return calculateAccountsTotal(state.accounts, state.operations, state.transfers);
+}
+
+function accountMoney(account, value, compact = false) {
+  return moneyInCurrency(value, account?.currency || state.settings.currency, compact);
+}
+
+function ownAccountsBalance() {
+  return roundMoney(activeAccounts()
+    .filter(account => account.includeInTotal !== false && account.type !== "credit")
+    .reduce((sum, account) => sum + accountBalance(account.id), 0));
+}
+
+function creditAccountsDebt() {
+  return roundMoney(activeAccounts()
+    .filter(account => account.type === "credit")
+    .reduce((sum, account) => sum + Math.abs(Math.min(0, accountBalance(account.id))), 0));
+}
+
+function activeCards() {
+  const activeAccountIds = new Set(activeAccounts().map(account => account.id));
+  return state.cards.filter(card => card.isArchived !== true && activeAccountIds.has(card.accountId));
+}
+
+function accountStatusLabel(account) {
+  if (account?.isArchived) return "В архиве";
+  if (account?.includeInTotal === false) return "Скрыт из общего баланса";
+  if (account?.hideBalance) return "Сумма скрыта";
+  return "Активен";
+}
+
+function operationTimestamp(item) {
+  return `${item?.date || ""} ${item?.createdAt || ""} ${item?.id || ""}`;
+}
+
+function accountUpdatedDate(account) {
+  const dates = [account?.updatedAt, account?.createdAt].filter(Boolean);
+  state.operations.forEach(operation => {
+    if (operation.accountId === account?.id) dates.push(operation.date || operation.createdAt);
+  });
+  state.transfers.forEach(transfer => {
+    if (transfer.fromAccountId === account?.id || transfer.toAccountId === account?.id) {
+      dates.push(transfer.date);
+    }
+  });
+  const sorted = dates.filter(Boolean).sort();
+  return sorted[sorted.length - 1] || isoToday();
+}
+
+function touchAccount(accountId) {
+  const account = accountById(accountId);
+  if (account) account.updatedAt = isoToday();
 }
 
 function initialBalanceOperation(accountId) {
@@ -1518,50 +1609,218 @@ function renderOperations() {
   }).join("");
 }
 
-function renderAccounts() {
-  const accounts = activeAccounts();
-  const accountCount = accounts.length;
-  const cardCount = state.cards.filter(card => card.isArchived !== true).length;
-  document.querySelector("#accountsTotal").textContent = money(totalAccountsBalance());
-  document.querySelector("#accountsCount").textContent =
-    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])}${cardCount ? ` · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}` : ""}`;
-  document.querySelector("#accountCards").innerHTML = accounts.map(account => {
+function accountHistory(accountId) {
+  const operationIds = state.operations.filter(operation => operation.accountId === accountId);
+  const transferIds = state.transfers.filter(transfer =>
+    transfer.fromAccountId === accountId || transfer.toAccountId === accountId
+  );
+  const recurringIds = state.recurring.filter(item => item.accountId === accountId);
+  const cardIds = state.cards.filter(card => card.accountId === accountId);
+  return {
+    operations: operationIds,
+    transfers: transferIds,
+    recurring: recurringIds,
+    cards: cardIds,
+    hasAny: operationIds.length > 0 || transferIds.length > 0 || recurringIds.length > 0 || cardIds.length > 0
+  };
+}
+
+function visibleAccountsForFilter() {
+  const accounts = accountFilter === "archive" ? state.accounts.filter(account => account.isArchived) : activeAccounts();
+  if (accountFilter === "accounts") return accounts.filter(account => account.type !== "cash");
+  if (accountFilter === "cards") return accounts.filter(account => cardsForAccount(account.id, accountFilter === "archive").length > 0);
+  if (accountFilter === "cash") return accounts.filter(account => account.type === "cash");
+  return accounts;
+}
+
+function accountEmptyMessage() {
+  if (accountFilter === "archive") return ["Архив пуст", "Архивированные счета появятся здесь"];
+  if (accountFilter === "cards") return ["Нет карт", "Добавьте карту и привяжите её к счёту"];
+  if (accountFilter === "cash") return ["Нет наличных", "Добавьте кошелёк для наличных"];
+  if (accountFilter === "accounts") return ["Нет счетов", "Добавьте банковский, накопительный или электронный счёт"];
+  return ["Нет счетов", "Добавьте первый счёт, карту или наличные"];
+}
+
+function accountActivityItems(mode = accountActivityFilter) {
+  const operations = state.operations.map(operation => {
+    const amount = Number(operation.amount || 0);
+    const isIncome = operation.type === "income";
+    const isExpense = operation.type === "expense" || operation.type === "fee";
+    const isNeutral = operation.type === "initial_balance" || operation.type === "balance_adjustment";
+    const card = state.cards.find(item => item.id === operation.cardId);
+    const prefix = isNeutral
+      ? (operation.type === "balance_adjustment" && amount < 0 ? "− " : "")
+      : `${operationAmountPrefix(operation.type, amount)} `;
+    return {
+      id: operation.id,
+      source: "operation",
+      date: operation.date || operation.createdAt || "",
+      sortKey: operationTimestamp(operation),
+      icon: visualFor(operation.category, operation.type),
+      title: operation.note || operation.category || operationTypeLabel(operation.type),
+      category: operation.category || operationTypeLabel(operation.type),
+      account: accountName(operation.accountId),
+      card: card ? cardDisplayName(card) : "",
+      typeLabel: operationTypeLabel(operation.type),
+      amount: `${prefix}${money(Math.abs(amount))}`,
+      amountClass: isIncome ? "income" : (isExpense ? "expense" : "neutral"),
+      canDelete: operation.type === "income" || operation.type === "expense",
+      rawId: operation.id
+    };
+  });
+
+  const transfers = state.transfers.map(transfer => ({
+    id: transfer.id,
+    source: "transfer",
+    date: transfer.date || "",
+    sortKey: operationTimestamp(transfer),
+    icon: ["⇄", "sky"],
+    title: transfer.note || "Перевод между счетами",
+    category: transferFee(transfer) ? `Перевод · комиссия ${money(transferFee(transfer))}` : "Перевод",
+    account: `${accountName(transfer.fromAccountId)} → ${accountName(transfer.toAccountId)}`,
+    card: "",
+    typeLabel: "Перевод",
+    amount: money(transfer.amount),
+    amountClass: "neutral",
+    canDelete: true,
+    rawId: transfer.id
+  }));
+
+  const items = mode === "transfers" ? transfers : [...operations, ...transfers];
+  return items.sort((a, b) => String(b.sortKey).localeCompare(String(a.sortKey)));
+}
+
+function latestAccountActivity(accountId) {
+  return accountActivityItems("all")
+    .filter(item => {
+      if (item.source === "operation") {
+        const operation = state.operations.find(entry => entry.id === item.rawId);
+        return operation?.accountId === accountId;
+      }
+      const transfer = state.transfers.find(entry => entry.id === item.rawId);
+      return transfer?.fromAccountId === accountId || transfer?.toAccountId === accountId;
+    })[0];
+}
+
+function renderAccountCards(accounts) {
+  const target = document.querySelector("#accountCards");
+  if (!accounts.length) {
+    const [title, text] = accountEmptyMessage();
+    target.innerHTML = `<article class="card accounts-empty-state"><span>▣</span><b>${escapeHtml(title)}</b><small>${escapeHtml(text)}</small></article>`;
+    return;
+  }
+
+  target.innerHTML = accounts.map(account => {
     const balance = accountBalance(account.id);
-    const accountCards = cardsForAccount(account.id);
-    const cardLabel = accountCards.length
-      ? accountCards.map(cardDisplayName).join(" · ")
-      : accountTypeName(account.type);
-    const operationCount = state.operations.filter(operation =>
-      operation.accountId === account.id && operation.type !== "initial_balance"
-    ).length;
-    return `<article class="account-card ${accountVisualClass(account.type)}">
-      <div class="account-card-head">
-        <span class="account-card-icon">${accountIcon(account.type)}</span>
-        <div>
-          <button class="account-card-menu" data-edit-account="${account.id}" aria-label="Изменить счёт">✎</button>
-          <button class="account-card-menu" data-delete-account="${account.id}" aria-label="Удалить счёт">×</button>
+    const accountCards = cardsForAccount(account.id, accountFilter === "archive")
+      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || String(a.name).localeCompare(String(b.name), "ru"));
+    const lastActivity = latestAccountActivity(account.id);
+    const history = accountHistory(account.id);
+    const updatedAt = accountUpdatedDate(account);
+    const colorClass = accountColorClass(account.color) || accountVisualClass(account.type);
+    const cardList = accountCards.length
+      ? accountCards.map(card => `<button class="account-linked-card ${accountColorClass(card.color)} ${card.isArchived ? "archived" : ""}" type="button" data-edit-card="${escapeHtml(card.id)}">
+          <span>${escapeHtml(cardPaymentSystemName(card.paymentSystem))}</span>
+          <b>${escapeHtml(cardNumberLabel(card))}</b>
+          <small>${escapeHtml(card.name)} · ${escapeHtml(cardTypeName(card.cardType))} · ${escapeHtml(cardFormatName(card))}${card.expirationDate ? ` · до ${escapeHtml(card.expirationDate)}` : ""}</small>
+        </button>`).join("")
+      : `<div class="account-no-cards">Карт нет</div>`;
+    return `<article class="account-row ${colorClass} ${account.isArchived ? "archived" : ""}">
+      <div class="account-row-main">
+        <span class="account-row-icon">${escapeHtml(accountDisplayIcon(account))}</span>
+        <div class="account-row-title">
+          <div class="account-row-name">
+            <b>${escapeHtml(account.name)}</b>
+            <span>${escapeHtml(accountStatusLabel(account))}</span>
+          </div>
+          <small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))}</small>
+        </div>
+        <div class="account-row-balance">
+          <b class="sensitive ${account.hideBalance ? "account-private-amount" : ""}">${accountMoney(account, balance)}</b>
+          <small>${escapeHtml(account.currency || state.settings.currency)} · обновлён ${formatDate(updatedAt, true)}</small>
+        </div>
+        <div class="account-menu-wrap">
+          <button class="account-menu-button" type="button" data-account-menu="${escapeHtml(account.id)}" aria-label="Меню счёта">•••</button>
+          <div class="account-action-menu" data-account-menu-panel="${escapeHtml(account.id)}" hidden>
+            <button type="button" data-account-action="open" data-account-id="${escapeHtml(account.id)}">Открыть</button>
+            <button type="button" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">Добавить операцию</button>
+            <button type="button" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">Перевести</button>
+            <button type="button" data-account-action="edit" data-account-id="${escapeHtml(account.id)}">Изменить</button>
+            <button type="button" data-account-action="reconcile" data-account-id="${escapeHtml(account.id)}">Сверить баланс</button>
+            <button type="button" data-account-action="toggle-total" data-account-id="${escapeHtml(account.id)}">${account.includeInTotal === false ? "Показывать в общем балансе" : "Скрыть из общего баланса"}</button>
+            <button type="button" data-account-action="archive" data-account-id="${escapeHtml(account.id)}">${account.isArchived ? "Вернуть из архива" : "Архивировать"}</button>
+            <button type="button" class="danger" data-account-action="delete" data-account-id="${escapeHtml(account.id)}">Удалить</button>
+          </div>
         </div>
       </div>
-      <div class="account-card-name">${escapeHtml(account.name)}</div>
-      <strong class="account-card-balance sensitive">${money(balance)}</strong>
-      <div class="account-card-foot"><span>${escapeHtml(cardLabel)}</span><span>${operationCount} ${plural(operationCount, ["операция", "операции", "операций"])}</span></div>
+      <div class="account-row-details">
+        <div class="account-cards-block">
+          <span>Привязанные карты (${accountCards.length})</span>
+          <div class="account-linked-cards">${cardList}</div>
+        </div>
+        <div class="account-last-operation">
+          <span>Последняя операция</span>
+          ${lastActivity ? `<b>${escapeHtml(lastActivity.title)}</b><small>${escapeHtml(lastActivity.typeLabel)} · ${formatDate(lastActivity.date, true)} · ${escapeHtml(lastActivity.category)}</small>` : "<b>Операций нет</b><small>История появится после первой записи</small>"}
+        </div>
+        <div class="account-row-meta">
+          <span>${history.operations.length} ${plural(history.operations.length, ["операция", "операции", "операций"])}</span>
+          <span>${history.transfers.length} ${plural(history.transfers.length, ["перевод", "перевода", "переводов"])}</span>
+          <span>${account.includeInSafetyFund ? "В подушке" : "Не в подушке"}</span>
+        </div>
+      </div>
     </article>`;
   }).join("");
+}
 
-  const transfers = [...state.transfers].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+function renderAccountActivity() {
+  const items = accountActivityItems();
   document.querySelector("#transferCount").textContent =
-    `${transfers.length} ${plural(transfers.length, ["перевод", "перевода", "переводов"])}`;
-  document.querySelector("#transferList").innerHTML = transfers.length
-    ? transfers.map(transfer => `<div class="transfer-item">
-        <span class="transfer-icon">⇄</span>
-        <div class="transfer-copy">
-          <b>${escapeHtml(accountName(transfer.fromAccountId))} → ${escapeHtml(accountName(transfer.toAccountId))}</b>
-          <small>${formatDate(transfer.date, true)}${transferFee(transfer) ? ` · комиссия ${money(transferFee(transfer))}` : ""}${transfer.note ? ` · ${escapeHtml(transfer.note)}` : ""}</small>
-        </div>
-        <strong class="sensitive">${money(transfer.amount)}</strong>
-        <button class="row-menu" data-delete-transfer="${transfer.id}" aria-label="Удалить перевод">×</button>
-      </div>`).join("")
-    : `<div class="empty-state"><span>⇄</span>Переводы между счетами появятся здесь</div>`;
+    `${items.length} ${plural(items.length, ["операция", "операции", "операций"])}`;
+  const target = document.querySelector("#transferList");
+  if (!items.length) {
+    const text = accountActivityFilter === "transfers"
+      ? "Переводы между счетами появятся здесь"
+      : "Доходы, расходы, переводы и корректировки появятся здесь";
+    const title = accountActivityFilter === "transfers" ? "Нет переводов" : "Нет операций";
+    target.innerHTML = `<div class="empty-state"><span>⇄</span><b>${title}</b><small>${text}</small></div>`;
+    return;
+  }
+  target.innerHTML = items.slice(0, 10).map(item => {
+    const [icon, color] = item.icon;
+    const deleteButton = item.source === "transfer"
+      ? `<button class="row-menu" data-delete-transfer="${escapeHtml(item.rawId)}" aria-label="Удалить перевод">×</button>`
+      : (item.canDelete ? `<button class="row-menu" data-edit-operation="${escapeHtml(item.rawId)}" aria-label="Изменить">✎</button><button class="row-menu" data-delete-operation="${escapeHtml(item.rawId)}" aria-label="Удалить операцию">×</button>` : "");
+    return `<div class="account-activity-item">
+      <span class="stat-icon ${color}">${icon}</span>
+      <div class="account-activity-copy">
+        <b>${escapeHtml(item.title)}</b>
+        <small>${formatDate(item.date, true)} · ${escapeHtml(item.category)} · ${escapeHtml(item.account)}${item.card ? ` · ${escapeHtml(item.card)}` : ""} · ${escapeHtml(item.typeLabel)}</small>
+      </div>
+      <strong class="account-activity-amount ${item.amountClass} sensitive">${escapeHtml(item.amount)}</strong>
+      <div class="account-activity-actions">${deleteButton}</div>
+    </div>`;
+  }).join("");
+}
+
+function renderAccounts() {
+  const accounts = visibleAccountsForFilter();
+  const accountCount = activeAccounts().length;
+  const cardCount = activeCards().length;
+  document.querySelector("#accountsTotal").textContent = money(ownAccountsBalance());
+  document.querySelector("#accountsCount").textContent =
+    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])} · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}`;
+  document.querySelector("#accountsActiveCount").textContent = accountCount;
+  document.querySelector("#accountsCardCount").textContent = cardCount;
+  document.querySelector("#accountsDebtTotal").textContent = money(creditAccountsDebt());
+  document.querySelector("#accountsPrivacyToggle").textContent = privacyMode ? "◌ Показать суммы" : "◉ Скрыть суммы";
+  document.querySelectorAll("#accountsFilter button").forEach(button => {
+    button.classList.toggle("active", button.dataset.accountFilter === accountFilter);
+  });
+  document.querySelectorAll("#accountActivityFilter button").forEach(button => {
+    button.classList.toggle("active", button.dataset.accountActivity === accountActivityFilter);
+  });
+  renderAccountCards(accounts);
+  renderAccountActivity();
 }
 
 function renderRecurring() {
@@ -2467,12 +2726,23 @@ function fillAccountSelects() {
   fillAccountSelect(document.querySelector("#operationAccount"));
   fillAccountSelect(document.querySelector("#transferFrom"));
   fillAccountSelect(document.querySelector("#transferTo"));
+  const cardAccount = document.querySelector("#cardAccount");
+  if (cardAccount) fillCardAccountSelect(cardAccount);
   const paymentAccount = document.querySelector("#paymentAccount");
   if (paymentAccount) fillAccountSelect(paymentAccount);
 }
 
+function fillCardAccountSelect(select, selectedId = "") {
+  const current = selectedId || select.value || activeAccounts()[0]?.id || state.accounts[0]?.id || "";
+  const options = activeAccounts().length ? activeAccounts() : state.accounts;
+  select.innerHTML = options.map(account =>
+    `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${escapeHtml(accountTypeName(account.type))}</option>`
+  ).join("");
+  select.value = options.some(account => account.id === current) ? current : (options[0]?.id || "");
+}
+
 function hideModalForms() {
-  ["operationForm", "debtForm", "paymentForm", "accountForm", "transferForm", "recurringForm", "backupForm"].forEach(id => {
+  ["operationForm", "debtForm", "paymentForm", "accountForm", "cardForm", "accountDetailsPanel", "transferForm", "recurringForm", "backupForm"].forEach(id => {
     document.querySelector(`#${id}`).hidden = true;
   });
 }
@@ -2518,7 +2788,7 @@ function openRecurringModal(item = null) {
   setTimeout(() => document.querySelector("#recurringName").focus(), 100);
 }
 
-function openOperationModal(type, operation = null) {
+function openOperationModal(type, operation = null, preferredAccountId = "") {
   const isIncome = type === "income";
   document.querySelector("#modalKicker").textContent = isIncome ? "НОВЫЙ ДОХОД" : "НОВЫЙ РАСХОД";
   document.querySelector("#modalTitle").textContent = operation ? "Изменить операцию" : (isIncome ? "Добавить доход" : "Добавить расход");
@@ -2530,7 +2800,7 @@ function openOperationModal(type, operation = null) {
   document.querySelector("#amountSign").textContent = isIncome ? "+" : "−";
   document.querySelector("#amountSign").style.color = isIncome ? "var(--mint)" : "var(--coral)";
   document.querySelector("#operationDate").value = operation?.date || isoToday();
-  fillAccountSelect(document.querySelector("#operationAccount"), operation?.accountId);
+  fillAccountSelect(document.querySelector("#operationAccount"), operation?.accountId || preferredAccountId);
   document.querySelector("#operationNote").value = operation?.note || "";
   fillCategorySelect(type);
   if (operation) document.querySelector("#operationCategory").value = operation.category;
@@ -2540,24 +2810,89 @@ function openOperationModal(type, operation = null) {
 
 function setAccountType(type) {
   const normalized = normalizeAccountType(type);
-  const pickerType = normalized === "current" ? "card" : normalized;
   document.querySelector("#accountType").value = normalized;
   document.querySelectorAll("[data-account-type]").forEach(button => {
-    button.classList.toggle("active", button.dataset.accountType === pickerType);
+    button.classList.toggle("active", button.dataset.accountType === normalized);
   });
 }
 
-function openAccountModal(account = null) {
+function openAccountModal(account = null, defaults = {}) {
   hideModalForms();
+  const draft = account || defaults;
   document.querySelector("#modalKicker").textContent = "СЧЁТ";
   document.querySelector("#modalTitle").textContent = account ? "Изменить счёт" : "Добавить счёт";
   document.querySelector("#accountForm").hidden = false;
   document.querySelector("#accountId").value = account?.id || "";
-  document.querySelector("#accountName").value = account?.name || "";
+  document.querySelector("#accountName").value = draft?.name || "";
+  document.querySelector("#accountBank").value = draft?.bankName || "";
+  document.querySelector("#accountCurrency").value = draft?.currency || state.settings.currency || "₽";
   document.querySelector("#accountOpeningBalance").value = Number(account ? initialBalanceAmount(account.id) : 0);
-  setAccountType(account?.type || "current");
+  document.querySelector("#accountColor").value = accountColorClass(draft?.color) || "";
+  document.querySelector("#accountIconValue").value = draft?.icon || "";
+  document.querySelector("#accountIncludeInTotal").checked = draft?.includeInTotal !== false;
+  document.querySelector("#accountIncludeInSafetyFund").checked = draft?.includeInSafetyFund === true;
+  document.querySelector("#accountAllowNegative").checked = draft?.allowNegativeBalance === true || draft?.type === "credit";
+  document.querySelector("#accountHideBalance").checked = draft?.hideBalance === true;
+  setAccountType(draft?.type || "current");
   openModal();
   setTimeout(() => document.querySelector("#accountName").focus(), 100);
+}
+
+function openCardModal(card = null, defaults = {}) {
+  const accounts = activeAccounts();
+  if (!accounts.length && !state.accounts.length) {
+    showToast("Сначала добавьте счёт для карты");
+    openAccountModal(null, { type: "current" });
+    return;
+  }
+  const draft = card || defaults;
+  hideModalForms();
+  document.querySelector("#modalKicker").textContent = "КАРТА";
+  document.querySelector("#modalTitle").textContent = card ? "Изменить карту" : "Добавить карту";
+  document.querySelector("#cardForm").hidden = false;
+  document.querySelector("#cardId").value = card?.id || "";
+  document.querySelector("#cardName").value = draft?.name || "Карта";
+  document.querySelector("#cardLastFour").value = draft?.lastFourDigits || "";
+  document.querySelector("#cardPaymentSystem").value = draft?.paymentSystem || "mir";
+  document.querySelector("#cardType").value = draft?.cardType || "debit";
+  document.querySelector("#cardVirtual").value = draft?.isVirtual ? "virtual" : "physical";
+  fillCardAccountSelect(document.querySelector("#cardAccount"), draft?.accountId);
+  document.querySelector("#cardExpiration").value = draft?.expirationDate || "";
+  document.querySelector("#cardCreditLimit").value = Number(draft?.creditLimit || 0);
+  document.querySelector("#cardPrimary").checked = draft?.isPrimary !== false;
+  document.querySelector("#cardColor").value = accountColorClass(draft?.color) || "";
+  document.querySelector("#cardLegacyHint").hidden = !(card?.isLegacy && card?.numberMissing && !card?.lastFourDigits);
+  openModal();
+  setTimeout(() => document.querySelector("#cardName").focus(), 100);
+}
+
+function openAccountDetailsModal(account) {
+  if (!account) return;
+  hideModalForms();
+  const balance = accountBalance(account.id);
+  const accountCards = cardsForAccount(account.id, true);
+  const history = accountHistory(account.id);
+  document.querySelector("#modalKicker").textContent = "СЧЁТ";
+  document.querySelector("#modalTitle").textContent = account.name;
+  const panel = document.querySelector("#accountDetailsPanel");
+  panel.hidden = false;
+  panel.innerHTML = `<div class="account-details-summary">
+    <span class="account-row-icon ${accountColorClass(account.color) || accountVisualClass(account.type)}">${escapeHtml(accountDisplayIcon(account))}</span>
+    <div><b class="sensitive">${accountMoney(account, balance)}</b><small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))} · ${escapeHtml(accountStatusLabel(account))}</small></div>
+  </div>
+  <div class="account-details-grid">
+    <span>Валюта<b>${escapeHtml(account.currency || state.settings.currency)}</b></span>
+    <span>Карт<b>${accountCards.length}</b></span>
+    <span>Операций<b>${history.operations.length}</b></span>
+    <span>Переводов<b>${history.transfers.length}</b></span>
+  </div>
+  <div class="account-details-actions">
+    <button class="button secondary small" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">Добавить операцию</button>
+    <button class="button secondary small" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">Перевести</button>
+    <button class="button secondary small" data-create-card="${escapeHtml(account.id)}">Добавить карту</button>
+    <button class="button primary small" data-account-action="edit" data-account-id="${escapeHtml(account.id)}">Изменить</button>
+  </div>`;
+  openModal();
 }
 
 function renderTransferPreview() {
@@ -2572,12 +2907,13 @@ function renderTransferPreview() {
     return;
   }
   const balance = accountBalance(fromId);
+  const fromAccount = accountById(fromId);
   preview.innerHTML = `Доступно на счёте «${escapeHtml(accountName(fromId))}»: <b class="sensitive">${money(balance)}</b>`
     + (fee ? `<br>Комиссия: <b class="sensitive">${money(fee)}</b>` : "")
-    + (amount + fee > balance ? `<br><span class="amount-expense">Не хватает ${money(amount + fee - balance)}</span>` : "");
+    + (fromAccount?.allowNegativeBalance !== true && amount + fee > balance ? `<br><span class="amount-expense">Не хватает ${money(amount + fee - balance)}</span>` : "");
 }
 
-function openTransferModal() {
+function openTransferModal(preferredFromId = "") {
   const accounts = activeAccounts();
   if (accounts.length < 2) {
     showToast("Для перевода добавьте второй счёт");
@@ -2588,8 +2924,10 @@ function openTransferModal() {
   document.querySelector("#modalKicker").textContent = "МЕЖДУ СЧЕТАМИ";
   document.querySelector("#modalTitle").textContent = "Новый перевод";
   document.querySelector("#transferForm").hidden = false;
-  fillAccountSelect(document.querySelector("#transferFrom"), accounts[0].id);
-  fillAccountSelect(document.querySelector("#transferTo"), accounts[1].id);
+  const fromId = accounts.some(account => account.id === preferredFromId) ? preferredFromId : accounts[0].id;
+  const toId = accounts.find(account => account.id !== fromId)?.id || accounts[1].id;
+  fillAccountSelect(document.querySelector("#transferFrom"), fromId);
+  fillAccountSelect(document.querySelector("#transferTo"), toId);
   document.querySelector("#transferAmount").value = "";
   if (document.querySelector("#transferFee")) document.querySelector("#transferFee").value = 0;
   document.querySelector("#transferDate").value = isoToday();
@@ -2928,6 +3266,150 @@ function importData(file) {
   reader.readAsText(file);
 }
 
+function closeAccountsAddMenu() {
+  const menu = document.querySelector("#accountsAddMenu");
+  const toggle = document.querySelector("#accountsAddToggle");
+  if (menu) menu.hidden = true;
+  if (toggle) toggle.setAttribute("aria-expanded", "false");
+}
+
+function closeAccountMenus(exceptId = "") {
+  document.querySelectorAll("[data-account-menu-panel]").forEach(panel => {
+    panel.hidden = panel.dataset.accountMenuPanel !== exceptId;
+  });
+}
+
+function toggleAccountActionMenu(accountId) {
+  const panel = [...document.querySelectorAll("[data-account-menu-panel]")]
+    .find(item => item.dataset.accountMenuPanel === accountId);
+  if (!panel) return;
+  const shouldOpen = panel.hidden;
+  closeAccountMenus(shouldOpen ? accountId : "");
+  panel.hidden = !shouldOpen;
+}
+
+function createAccountDefaults(type) {
+  const normalized = normalizeAccountType(type);
+  return {
+    type: normalized,
+    name: normalized === "cash"
+      ? "Наличные"
+      : normalized === "savings"
+        ? "Накопительный счёт"
+        : normalized === "wallet"
+          ? "Электронный кошелёк"
+          : "Новый счёт",
+    currency: state.settings.currency || "₽",
+    includeInTotal: true,
+    includeInSafetyFund: normalized === "savings",
+    allowNegativeBalance: normalized === "credit",
+    hideBalance: false
+  };
+}
+
+function createCardDefaults(accountId = "") {
+  return {
+    accountId: accountId || activeAccounts()[0]?.id || state.accounts[0]?.id || "",
+    name: "Карта",
+    paymentSystem: "mir",
+    cardType: "debit",
+    isVirtual: false,
+    creditLimit: 0,
+    isPrimary: true
+  };
+}
+
+function archiveAccount(accountId, archived = true) {
+  const account = accountById(accountId);
+  if (!account) return;
+  if (archived && activeAccounts().length <= 1 && account.isArchived !== true) {
+    showToast("Нужен хотя бы один активный счёт");
+    return;
+  }
+  account.isArchived = archived;
+  account.updatedAt = isoToday();
+  saveState();
+  renderAll();
+  showToast(archived ? "Счёт перемещён в архив" : "Счёт возвращён из архива");
+}
+
+function deleteAccountSafely(accountId) {
+  const account = accountById(accountId);
+  if (!account) return;
+  const history = accountHistory(accountId);
+  if (state.accounts.length <= 1) {
+    showToast("Нужен хотя бы один счёт");
+    return;
+  }
+  if (history.hasAny) {
+    if (confirm("У счёта есть история, переводы или карты. Вместо удаления архивировать его?")) {
+      archiveAccount(accountId, true);
+    }
+    return;
+  }
+  if (!confirm("Удалить этот счёт?")) return;
+  state.accounts = state.accounts.filter(item => item.id !== accountId);
+  state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
+  saveState();
+  renderAll();
+  showToast("Счёт удалён");
+}
+
+function reconcileAccount(accountId) {
+  const account = accountById(accountId);
+  if (!account) return;
+  const current = accountBalance(accountId);
+  const value = prompt(`Текущий баланс счёта «${account.name}»: ${accountMoney(account, current)}. Введите фактический баланс:`, String(current));
+  if (value === null) return;
+  const actual = Number(String(value).replace(",", "."));
+  if (!Number.isFinite(actual)) {
+    showToast("Введите корректную сумму");
+    return;
+  }
+  const delta = roundMoney(actual - current);
+  if (delta === 0) {
+    showToast("Баланс уже совпадает");
+    return;
+  }
+  state.operations.push({
+    id: uid(),
+    type: "balance_adjustment",
+    amount: delta,
+    category: "Корректировка",
+    date: isoToday(),
+    accountId,
+    cardId: "",
+    account: account.name,
+    note: "Сверка баланса",
+    isBalanceAdjustment: true,
+    createdAt: new Date().toISOString()
+  });
+  touchAccount(accountId);
+  saveState();
+  renderAll();
+  showToast("Баланс скорректирован");
+}
+
+function handleAccountAction(action, accountId) {
+  const account = accountById(accountId);
+  if (!account) return;
+  closeAccountMenus();
+  if (action === "open") openAccountDetailsModal(account);
+  if (action === "operation") openOperationModal("expense", null, accountId);
+  if (action === "transfer") openTransferModal(accountId);
+  if (action === "edit") openAccountModal(account);
+  if (action === "reconcile") reconcileAccount(accountId);
+  if (action === "toggle-total") {
+    account.includeInTotal = account.includeInTotal === false;
+    account.updatedAt = isoToday();
+    saveState();
+    renderAll();
+    showToast(account.includeInTotal ? "Счёт учитывается в общем балансе" : "Счёт скрыт из общего баланса");
+  }
+  if (action === "archive") archiveAccount(accountId, account.isArchived !== true);
+  if (action === "delete") deleteAccountSafely(accountId);
+}
+
 document.addEventListener("click", event => {
   const desktopAddToggle = event.target.closest("#desktopQuickAdd");
   const desktopAddMenu = document.querySelector("#desktopAddMenu");
@@ -2936,6 +3418,16 @@ document.addEventListener("click", event => {
     desktopAddToggle.setAttribute("aria-expanded", String(!desktopAddMenu.hidden));
   } else if (!event.target.closest("#desktopAddMenu")) {
     closeDesktopAddMenu();
+  }
+
+  const accountsAddToggle = event.target.closest("#accountsAddToggle");
+  const accountsAddMenu = document.querySelector("#accountsAddMenu");
+  if (accountsAddToggle) {
+    accountsAddMenu.hidden = !accountsAddMenu.hidden;
+    accountsAddToggle.setAttribute("aria-expanded", String(!accountsAddMenu.hidden));
+  } else if (accountsAddMenu && !event.target.closest("#accountsAddMenu")) {
+    accountsAddMenu.hidden = true;
+    document.querySelector("#accountsAddToggle")?.setAttribute("aria-expanded", "false");
   }
 
   const profileToggle = event.target.closest("#profileMenuButton");
@@ -2997,6 +3489,42 @@ document.addEventListener("click", event => {
     showPage(pageButton.dataset.page);
   }
 
+  const createAccountButton = event.target.closest("[data-create-account]");
+  if (createAccountButton) {
+    closeAccountsAddMenu();
+    closeModal();
+    openAccountModal(null, createAccountDefaults(createAccountButton.dataset.createAccount));
+    return;
+  }
+
+  const createCardButton = event.target.closest("[data-create-card]");
+  if (createCardButton) {
+    closeAccountsAddMenu();
+    const accountId = createCardButton.dataset.createCard || "";
+    openCardModal(null, createCardDefaults(accountId));
+    return;
+  }
+
+  const accountMenuButton = event.target.closest("[data-account-menu]");
+  if (accountMenuButton) {
+    toggleAccountActionMenu(accountMenuButton.dataset.accountMenu);
+    return;
+  }
+  if (!event.target.closest(".account-menu-wrap")) closeAccountMenus();
+
+  const accountAction = event.target.closest("[data-account-action]");
+  if (accountAction) {
+    handleAccountAction(accountAction.dataset.accountAction, accountAction.dataset.accountId);
+    return;
+  }
+
+  const editCard = event.target.closest("[data-edit-card]");
+  if (editCard) {
+    const card = state.cards.find(item => item.id === editCard.dataset.editCard);
+    if (card) openCardModal(card);
+    return;
+  }
+
   const goButton = event.target.closest("[data-go]");
   if (goButton) showPage(goButton.dataset.go);
 
@@ -3010,6 +3538,7 @@ document.addEventListener("click", event => {
     const modalType = modalButton.dataset.openModal;
     if (modalType === "debt") openDebtModal();
     else if (modalType === "account") openAccountModal();
+    else if (modalType === "card") openCardModal(null, createCardDefaults());
     else if (modalType === "transfer") openTransferModal();
     else if (modalType === "recurring") openRecurringModal();
     else openOperationModal(modalType);
@@ -3027,29 +3556,6 @@ document.addEventListener("click", event => {
     saveState();
     renderAll();
     showToast("Операция удалена");
-  }
-
-  const editAccount = event.target.closest("[data-edit-account]");
-  if (editAccount) openAccountModal(accountById(editAccount.dataset.editAccount));
-
-  const deleteAccount = event.target.closest("[data-delete-account]");
-  if (deleteAccount) {
-    const id = deleteAccount.dataset.deleteAccount;
-    const isUsed = state.operations.some(operation => operation.accountId === id)
-      || state.recurring.some(item => item.accountId === id)
-      || state.transfers.some(transfer => transfer.fromAccountId === id || transfer.toAccountId === id)
-      || state.cards.some(card => card.accountId === id);
-    if (state.accounts.length === 1) {
-      showToast("Нужен хотя бы один счёт");
-    } else if (isUsed) {
-      showToast("Счёт используется в операциях, переводах или расписании");
-    } else if (confirm("Удалить этот счёт?")) {
-      state.accounts = state.accounts.filter(account => account.id !== id);
-      state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
-      saveState();
-      renderAll();
-      showToast("Счёт удалён");
-    }
   }
 
   const deleteTransfer = event.target.closest("[data-delete-transfer]");
@@ -3124,6 +3630,20 @@ document.querySelector("#operationFilter").addEventListener("click", event => {
   renderOperations();
 });
 
+document.querySelector("#accountsFilter").addEventListener("click", event => {
+  const button = event.target.closest("[data-account-filter]");
+  if (!button) return;
+  accountFilter = button.dataset.accountFilter;
+  renderAccounts();
+});
+
+document.querySelector("#accountActivityFilter").addEventListener("click", event => {
+  const button = event.target.closest("[data-account-activity]");
+  if (!button) return;
+  accountActivityFilter = button.dataset.accountActivity;
+  renderAccounts();
+});
+
 document.querySelector("#operationSearch").addEventListener("input", renderOperations);
 document.querySelector("#calendarPrev").addEventListener("click", () => {
   calendarCursor = new Date(calendarCursor.getFullYear(), calendarCursor.getMonth() - 1, 1);
@@ -3160,19 +3680,24 @@ document.addEventListener("keydown", event => {
 document.querySelector("#operationForm").addEventListener("submit", event => {
   event.preventDefault();
   const accountId = document.querySelector("#operationAccount").value;
+  const id = document.querySelector("#operationId").value || uid();
+  const existing = state.operations.find(item => item.id === id);
   const operation = {
-    id: document.querySelector("#operationId").value || uid(),
+    id,
     type: document.querySelector("#operationType").value,
     amount: Number(document.querySelector("#operationAmount").value),
     category: document.querySelector("#operationCategory").value,
     date: document.querySelector("#operationDate").value,
     accountId,
+    cardId: existing?.accountId === accountId ? (existing?.cardId || "") : "",
     account: accountName(accountId),
-    note: document.querySelector("#operationNote").value.trim()
+    note: document.querySelector("#operationNote").value.trim(),
+    createdAt: existing?.createdAt || new Date().toISOString()
   };
   const index = state.operations.findIndex(item => item.id === operation.id);
   if (index >= 0) state.operations[index] = operation;
   else state.operations.push(operation);
+  touchAccount(accountId);
   saveState();
   closeModal();
   renderAll();
@@ -3231,24 +3756,32 @@ document.querySelector("#accountTypePicker").addEventListener("click", event => 
   if (button) setAccountType(button.dataset.accountType);
 });
 
+document.querySelector("#accountType").addEventListener("change", event => {
+  setAccountType(event.target.value);
+  if (event.target.value === "credit") {
+    document.querySelector("#accountAllowNegative").checked = true;
+  }
+});
+
 document.querySelector("#accountForm").addEventListener("submit", event => {
   event.preventDefault();
   const id = document.querySelector("#accountId").value || uid();
   const existing = accountById(id);
   const initialBalance = Number(document.querySelector("#accountOpeningBalance").value || 0);
+  const type = document.querySelector("#accountType").value;
   const account = normalizeAccount({
     id,
     name: document.querySelector("#accountName").value.trim(),
-    type: document.querySelector("#accountType").value,
-    currency: existing?.currency || state.settings.currency || "₽",
-    bankName: existing?.bankName || "",
-    includeInTotal: existing?.includeInTotal !== false,
-    includeInSafetyFund: existing?.includeInSafetyFund === true,
-    allowNegativeBalance: existing?.allowNegativeBalance === true,
-    hideBalance: existing?.hideBalance === true,
+    type,
+    currency: document.querySelector("#accountCurrency").value || state.settings.currency || "₽",
+    bankName: document.querySelector("#accountBank").value.trim(),
+    includeInTotal: document.querySelector("#accountIncludeInTotal").checked,
+    includeInSafetyFund: document.querySelector("#accountIncludeInSafetyFund").checked,
+    allowNegativeBalance: document.querySelector("#accountAllowNegative").checked || type === "credit",
+    hideBalance: document.querySelector("#accountHideBalance").checked,
     isArchived: existing?.isArchived === true,
-    color: existing?.color || "",
-    icon: existing?.icon || "",
+    color: document.querySelector("#accountColor").value,
+    icon: document.querySelector("#accountIconValue").value,
     createdAt: existing?.createdAt || isoToday(),
     updatedAt: isoToday()
   });
@@ -3264,6 +3797,56 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
   closeModal();
   renderAll();
   showToast(existing ? "Счёт обновлён" : "Счёт добавлен");
+});
+
+document.querySelector("#cardLastFour").addEventListener("input", event => {
+  event.target.value = event.target.value.replace(/\D/g, "").slice(0, 4);
+});
+
+document.querySelector("#cardForm").addEventListener("submit", event => {
+  event.preventDefault();
+  const id = document.querySelector("#cardId").value || uid();
+  const existing = state.cards.find(item => item.id === id);
+  const accountId = document.querySelector("#cardAccount").value;
+  const lastFourDigits = document.querySelector("#cardLastFour").value.trim();
+  if (!/^[0-9]{4}$/.test(lastFourDigits)) {
+    showToast("Укажите последние четыре цифры карты");
+    document.querySelector("#cardLastFour").focus();
+    return;
+  }
+  const isPrimary = document.querySelector("#cardPrimary").checked;
+  if (isPrimary) {
+    state.cards.forEach(card => {
+      if (card.accountId === accountId && card.id !== id) card.isPrimary = false;
+    });
+  }
+  const card = normalizeCard({
+    id,
+    accountId,
+    name: document.querySelector("#cardName").value.trim(),
+    lastFourDigits,
+    paymentSystem: document.querySelector("#cardPaymentSystem").value,
+    cardType: document.querySelector("#cardType").value,
+    isVirtual: document.querySelector("#cardVirtual").value === "virtual",
+    expirationDate: document.querySelector("#cardExpiration").value.trim(),
+    creditLimit: Number(document.querySelector("#cardCreditLimit").value || 0),
+    isPrimary,
+    isArchived: existing?.isArchived === true,
+    color: document.querySelector("#cardColor").value,
+    isLegacy: existing?.isLegacy === true,
+    isMigrated: existing?.isMigrated === true,
+    numberMissing: false,
+    createdAt: existing?.createdAt || isoToday(),
+    updatedAt: isoToday()
+  });
+  const index = state.cards.findIndex(item => item.id === id);
+  if (index >= 0) state.cards[index] = card;
+  else state.cards.push(card);
+  touchAccount(accountId);
+  saveState();
+  closeModal();
+  renderAll();
+  showToast(existing ? "Карта обновлена" : "Карта добавлена");
 });
 
 ["transferFrom", "transferTo", "transferAmount", "transferFee"].forEach(id => {
@@ -3287,7 +3870,8 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     showToast("Введите сумму больше нуля");
     return;
   }
-  if (amount + fee > accountBalance(fromAccountId)) {
+  const fromAccount = accountById(fromAccountId);
+  if (fromAccount?.allowNegativeBalance !== true && amount + fee > accountBalance(fromAccountId)) {
     showToast("На счёте недостаточно денег");
     return;
   }
@@ -3299,8 +3883,11 @@ document.querySelector("#transferForm").addEventListener("submit", event => {
     fee: roundMoney(fee),
     date: document.querySelector("#transferDate").value,
     note: document.querySelector("#transferNote").value.trim(),
-    comment: document.querySelector("#transferNote").value.trim()
+    comment: document.querySelector("#transferNote").value.trim(),
+    createdAt: new Date().toISOString()
   });
+  touchAccount(fromAccountId);
+  touchAccount(toAccountId);
   saveState();
   closeModal();
   renderAll();
@@ -3754,6 +4341,14 @@ document.querySelector("#privacyToggle").addEventListener("click", () => {
   privacyMode = !privacyMode;
   document.body.classList.toggle("privacy-mode", privacyMode);
   document.querySelector("#privacyToggle").textContent = privacyMode ? "◌" : "◉";
+  renderAccounts();
+});
+
+document.querySelector("#accountsPrivacyToggle").addEventListener("click", () => {
+  privacyMode = !privacyMode;
+  document.body.classList.toggle("privacy-mode", privacyMode);
+  document.querySelector("#privacyToggle").textContent = privacyMode ? "◌" : "◉";
+  renderAccounts();
 });
 
 document.querySelector("#notificationButton").addEventListener("click", async () => {

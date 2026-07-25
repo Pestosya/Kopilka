@@ -191,6 +191,14 @@
     return base64ToBytes(payload.key);
   }
 
+  function preserveVaultSecuritySettings(profileState, wrapper) {
+    profileState.settings ||= {};
+    profileState.settings.vaultPasswordWrap = wrapper || null;
+    profileState.settings.encryptedAtRest = true;
+    profileState.settings.vaultPinWrap = profileState.settings.vaultPinWrap || null;
+    return profileState;
+  }
+
   return {
     PASSWORD_ITERATIONS,
     BACKUP_ITERATIONS,
@@ -209,6 +217,7 @@
     encryptWithRawKey,
     decryptWithRawKey,
     wrapVaultKey,
-    unwrapVaultKey
+    unwrapVaultKey,
+    preserveVaultSecuritySettings
   };
 });

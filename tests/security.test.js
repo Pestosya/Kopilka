@@ -12,8 +12,13 @@ const {
   encryptWithRawKey,
   decryptWithRawKey,
   wrapVaultKey,
-  unwrapVaultKey
+  unwrapVaultKey,
+  preserveVaultSecuritySettings
 } = require("../modules/security.js");
+const {
+  CURRENT_SCHEMA_VERSION,
+  migrateData
+} = require("../modules/migrations.js");
 
 test("настройки защиты используют усиленное число итераций", () => {
   assert.equal(PASSWORD_ITERATIONS, 600000);
@@ -51,4 +56,68 @@ test("локальная база шифруется отдельным ключ
   const wrapped = await wrapVaultKey(key, "vault-password", 1000);
   assert.deepEqual(await unwrapVaultKey(wrapped, "vault-password"), key);
   await assert.rejects(() => unwrapVaultKey(wrapped, "wrong-password"));
+});
+
+test("legacy encrypted profile сохраняет password wrap после миграции и автосохранения", async () => {
+  const password = "LegacyPass123";
+  const key = new Uint8Array(32).fill(13);
+  const wrapper = await wrapVaultKey(key, password, 1000);
+  const legacyProfile = {
+    schemaVersion: 10,
+    settings: {
+      login: "legacy@example.com",
+      name: "Legacy",
+      encryptedAtRest: true,
+      vaultPasswordWrap: null,
+      vaultPinWrap: null,
+      currency: "₽"
+    },
+    accounts: [{
+      id: "legacy-card",
+      name: "Старая карта",
+      type: "card",
+      openingBalance: 12000,
+      createdAt: "2026-01-01"
+    }],
+    operations: [{
+      id: "legacy-expense",
+      accountId: "legacy-card",
+      type: "expense",
+      amount: 700,
+      category: "Продукты",
+      date: "2026-01-02"
+    }],
+    transfers: [],
+    recurring: [],
+    debts: []
+  };
+
+  const firstEnvelope = await encryptWithRawKey(legacyProfile, key);
+  const openedKey = await unwrapVaultKey(wrapper, password);
+  const decrypted = await decryptWithRawKey(firstEnvelope, openedKey);
+  const migrated = preserveVaultSecuritySettings(migrateData(decrypted), wrapper);
+
+  assert.equal(migrated.schemaVersion, CURRENT_SCHEMA_VERSION);
+  assert.equal(migrated.settings.encryptedAtRest, true);
+  assert.equal(migrated.settings.vaultPinWrap, null);
+  assert.deepEqual(migrated.settings.vaultPasswordWrap, wrapper);
+  assert.equal(migrated.cards.length, 1);
+  assert.equal(migrated.cards[0].lastFourDigits, "");
+  assert.equal(migrated.cards[0].numberMissing, true);
+
+  const autosavedEnvelope = await encryptWithRawKey(migrated, key);
+  const autosavedRecord = {
+    envelope: autosavedEnvelope,
+    wrap: migrated.settings.vaultPasswordWrap
+  };
+  const serializedAutosave = JSON.stringify(autosavedRecord);
+  assert.equal(serializedAutosave.includes(password), false);
+  assert.equal(JSON.stringify(autosavedEnvelope).includes("legacy-expense"), false);
+
+  const reopenedKey = await unwrapVaultKey(autosavedRecord.wrap, password);
+  assert.deepEqual(reopenedKey, key);
+  const reopened = await decryptWithRawKey(autosavedRecord.envelope, reopenedKey);
+  assert.equal(reopened.settings.vaultPasswordWrap.format, "kopilka-encrypted-backup");
+  assert.equal(reopened.operations.find(item => item.id === "initial-balance:legacy-card").amount, 12000);
+  await assert.rejects(() => unwrapVaultKey(autosavedRecord.wrap, "wrong-password"));
 });

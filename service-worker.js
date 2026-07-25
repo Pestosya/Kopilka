@@ -1,6 +1,6 @@
-const CACHE = "kopilka-v36-premium-icons";
+const CACHE = "kopilka-v40-accounts-cards";
 const ASSETS = [
-  "./", "./index.html", "./styles.css?v=36", "./app.js?v=37", "./manifest.webmanifest",
+  "./", "./index.html", "./styles.css?v=40", "./app.js?v=40", "./manifest.webmanifest",
   "./modules/migrations.js", "./modules/finance.js", "./modules/security.js",
   "./icon.svg", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"
 ];

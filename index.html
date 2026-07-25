@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
-  <link rel="stylesheet" href="styles.css?v=36">
+  <link rel="stylesheet" href="styles.css?v=40">
 </head>
 <body>
   <section class="app-lock" id="appLock">
@@ -100,7 +100,7 @@
         <button class="nav-link active" data-page="dashboard"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 5.5h6.5v6H4zM13.5 5.5H20v13h-6.5zM4 14.5h6.5v4H4z"/></svg></span>Обзор</button>
         <button class="nav-link" data-page="operations"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 4v16m0 0-3-3m3 3 3-3M17 20V4m0 0-3 3m3-3 3 3"/></svg></span>Операции</button>
         <button class="nav-link" data-page="recurring"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 7.5h-4.5V3m4.1 4.4A8 8 0 0 0 6.2 5.7M4 16.5h4.5V21m-4.1-4.4a8 8 0 0 0 13.4 1.7"/></svg></span>Регулярные</button>
-        <button class="nav-link" data-page="accounts"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v10H4zM4 10h16M7 14h3m6 0h1"/></svg></span>Счета</button>
+        <button class="nav-link" data-page="accounts"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v10H4zM4 10h16M7 14h3m6 0h1"/></svg></span>Счета и карты</button>
         <button class="nav-link" data-page="debts"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 3.5h10l2 2v15l-3-1.5-2.5 1.5L11 19l-2.5 1.5L5 19V5.5zM8.5 8h7M8.5 12h7M8.5 16h4"/></svg></span>Долги</button>
         <button class="nav-link" data-page="calendar"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 6.5h14v13H5zM8 3.5v5m8-5v5M5 10h14M8.5 14h2.5m2 0h2.5"/></svg></span>Календарь</button>
         <button class="nav-link" data-page="analytics"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19h16M6.5 15.5l4-4 3 3L18 8m0 0h-4m4 0v4"/></svg></span>Аналитика</button>
@@ -307,19 +307,51 @@
 
       <section class="page" id="accounts">
         <div class="accounts-hero">
-          <div><span>Деньги на всех счетах</span><b class="sensitive" id="accountsTotal">0 ₽</b><small id="accountsCount">0 счетов</small></div>
+          <div class="accounts-hero-main">
+            <span>Собственные деньги на активных счетах</span>
+            <b class="sensitive" id="accountsTotal">0 ₽</b>
+            <small id="accountsCount">0 счетов · 0 карт</small>
+            <button class="accounts-privacy" id="accountsPrivacyToggle" type="button">◉ Скрыть суммы</button>
+          </div>
+          <div class="accounts-hero-metrics">
+            <span>Активные счета<b id="accountsActiveCount">0</b></span>
+            <span>Активные карты<b id="accountsCardCount">0</b></span>
+            <span>Кредитная задолженность<b class="sensitive" id="accountsDebtTotal">0 ₽</b></span>
+          </div>
           <div class="accounts-hero-actions">
+            <div class="accounts-add-wrap">
+              <button class="button primary accounts-add-trigger" id="accountsAddToggle" type="button" aria-expanded="false">＋ Добавить</button>
+              <div class="accounts-add-menu" id="accountsAddMenu" hidden>
+                <button type="button" data-create-account="current"><span class="stat-icon sky">▣</span><b>Добавить счёт</b><small>Текущий счёт в банке</small></button>
+                <button type="button" data-create-card><span class="stat-icon lilac">▤</span><b>Добавить карту</b><small>Привязать к существующему счёту</small></button>
+                <button type="button" data-create-account="cash"><span class="stat-icon mint">₽</span><b>Добавить наличные</b><small>Кошелёк или конверт</small></button>
+                <button type="button" data-create-account="savings"><span class="stat-icon sunshine">◇</span><b>Добавить накопительный счёт</b><small>Цель или сбережения</small></button>
+                <button type="button" data-create-account="wallet"><span class="stat-icon coral">◉</span><b>Добавить электронный кошелёк</b><small>ЮMoney, PayPal и другие</small></button>
+              </div>
+            </div>
             <button class="button account-transfer-button" data-open-modal="transfer">⇄ Перевести</button>
-            <button class="button primary" data-open-modal="account">＋ Новый счёт</button>
           </div>
         </div>
-        <div class="account-grid" id="accountCards"></div>
-        <article class="card transfer-history-card">
-          <div class="card-title-row">
-            <div><span class="kicker purple">МЕЖДУ СЧЕТАМИ</span><h2>Последние переводы</h2></div>
-            <span class="count-label" id="transferCount">0 переводов</span>
+        <div class="accounts-toolbar">
+          <div class="segmented accounts-filter" id="accountsFilter">
+            <button class="active" data-account-filter="all">Все</button>
+            <button data-account-filter="accounts">Счета</button>
+            <button data-account-filter="cards">Карты</button>
+            <button data-account-filter="cash">Наличные</button>
+            <button data-account-filter="archive">Архив</button>
           </div>
-          <div class="transfer-list" id="transferList"></div>
+        </div>
+        <div class="account-list" id="accountCards"></div>
+        <article class="card account-activity-card">
+          <div class="card-title-row">
+            <div><span class="kicker purple">ИСТОРИЯ</span><h2>Последние операции</h2></div>
+            <span class="count-label" id="transferCount">0 операций</span>
+          </div>
+          <div class="segmented account-activity-filter" id="accountActivityFilter">
+            <button class="active" data-account-activity="all">Все операции</button>
+            <button data-account-activity="transfers">Переводы</button>
+          </div>
+          <div class="account-activity-list" id="transferList"></div>
         </article>
       </section>
 
@@ -522,7 +554,7 @@
     <button data-page="calendar"><span class="sunshine">▦</span><b>Календарь</b><small>Все даты оплаты</small></button>
   </div>
   <div class="mobile-group-menu mobile-more-menu" id="mobileMoreMenu" hidden>
-    <button data-page="accounts"><span class="sky">▣</span><b>Счета</b><small>Карты и наличные</small></button>
+    <button data-page="accounts"><span class="sky">▣</span><b>Счета и карты</b><small>Карты и наличные</small></button>
     <button data-page="analytics"><span class="lilac">⌁</span><b>Аналитика</b><small>Прогнозы и отчёты</small></button>
   </div>
 
@@ -601,17 +633,93 @@
       <form id="accountForm" class="modal-form" hidden>
         <input type="hidden" id="accountId">
         <div class="account-type-picker" id="accountTypePicker">
-          <button type="button" class="active" data-account-type="card"><span>▣</span>Карта</button>
+          <button type="button" class="active" data-account-type="current"><span>▣</span>Счёт</button>
           <button type="button" data-account-type="cash"><span>₽</span>Наличные</button>
           <button type="button" data-account-type="savings"><span>◇</span>Накопительный</button>
+          <button type="button" data-account-type="wallet"><span>◉</span>Кошелёк</button>
+          <button type="button" data-account-type="credit"><span>−</span>Кредитный</button>
         </div>
-        <input type="hidden" id="accountType" value="card">
         <div class="form-grid">
-          <label>Название счёта<input id="accountName" placeholder="Например, Зарплатная карта" required></label>
-          <label>Стартовый баланс<input id="accountOpeningBalance" type="number" step="0.01" value="0" required></label>
+          <label>Название<input id="accountName" placeholder="Например, Зарплатный счёт" required></label>
+          <label>Тип<select id="accountType" required>
+            <option value="current">Текущий счёт</option>
+            <option value="savings">Накопительный счёт</option>
+            <option value="deposit">Вклад</option>
+            <option value="cash">Наличные</option>
+            <option value="wallet">Электронный кошелёк</option>
+            <option value="credit">Кредитный счёт</option>
+            <option value="investment">Инвестиционный счёт</option>
+            <option value="other">Другой счёт</option>
+          </select></label>
+          <label>Банк<input id="accountBank" placeholder="Например, Сбербанк"></label>
+          <label>Валюта<select id="accountCurrency">
+            <option value="₽">Российский рубль (₽)</option>
+            <option value="$">Доллар ($)</option>
+            <option value="€">Евро (€)</option>
+          </select></label>
+          <label>Начальный баланс<input id="accountOpeningBalance" type="number" step="0.01" value="0" required></label>
+          <label>Цвет<select id="accountColor">
+            <option value="">По умолчанию</option>
+            <option value="purple">Фиолетовый</option>
+            <option value="blue">Синий</option>
+            <option value="mint">Зелёный</option>
+            <option value="coral">Коралловый</option>
+            <option value="yellow">Жёлтый</option>
+          </select></label>
+          <label>Иконка<select id="accountIconValue">
+            <option value="">По типу счёта</option>
+            <option value="▣">Счёт</option>
+            <option value="₽">Рубли</option>
+            <option value="◇">Накопления</option>
+            <option value="◉">Кошелёк</option>
+            <option value="−">Кредит</option>
+          </select></label>
+          <label class="form-check"><input id="accountIncludeInTotal" type="checkbox"><span><b>Учитывать в общем балансе</b><small>Сумма войдёт в верхние показатели</small></span></label>
+          <label class="form-check"><input id="accountIncludeInSafetyFund" type="checkbox"><span><b>Учитывать в финансовой подушке</b><small>Подходит для резервных счетов</small></span></label>
+          <label class="form-check"><input id="accountAllowNegative" type="checkbox"><span><b>Разрешить отрицательный баланс</b><small>Для кредитных и овердрафтных счетов</small></span></label>
+          <label class="form-check"><input id="accountHideBalance" type="checkbox"><span><b>Скрывать сумму</b><small>Всегда маскировать этот счёт</small></span></label>
         </div>
         <button class="button primary wide" type="submit">Сохранить счёт</button>
       </form>
+
+      <form id="cardForm" class="modal-form" hidden>
+        <input type="hidden" id="cardId">
+        <div class="form-grid">
+          <label>Название<input id="cardName" placeholder="Например, Основная карта" required></label>
+          <label>Последние четыре цифры<input id="cardLastFour" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" placeholder="1234"></label>
+          <label>Платёжная система<select id="cardPaymentSystem">
+            <option value="mir">МИР</option>
+            <option value="visa">Visa</option>
+            <option value="mastercard">Mastercard</option>
+            <option value="unionpay">UnionPay</option>
+            <option value="other">Другая</option>
+          </select></label>
+          <label>Тип карты<select id="cardType">
+            <option value="debit">Дебетовая</option>
+            <option value="credit">Кредитная</option>
+          </select></label>
+          <label>Формат<select id="cardVirtual">
+            <option value="physical">Физическая</option>
+            <option value="virtual">Виртуальная</option>
+          </select></label>
+          <label>Привязанный счёт<select id="cardAccount" required></select></label>
+          <label>Срок действия<input id="cardExpiration" placeholder="ММ/ГГ" maxlength="7"></label>
+          <label>Кредитный лимит<input id="cardCreditLimit" type="number" min="0" step="0.01" value="0"></label>
+          <label>Цвет<select id="cardColor">
+            <option value="">По умолчанию</option>
+            <option value="purple">Фиолетовый</option>
+            <option value="blue">Синий</option>
+            <option value="mint">Зелёный</option>
+            <option value="coral">Коралловый</option>
+            <option value="yellow">Жёлтый</option>
+          </select></label>
+          <label class="form-check"><input id="cardPrimary" type="checkbox"><span><b>Основная карта</b><small>Показывать первой у счёта</small></span></label>
+        </div>
+        <p class="form-hint" id="cardLegacyHint" hidden>Эта карта перенесена из старого счёта без номера. Она будет отображаться как «Карта без номера», пока вы не укажете последние четыре цифры вручную.</p>
+        <button class="button primary wide" type="submit">Сохранить карту</button>
+      </form>
+
+      <div id="accountDetailsPanel" class="modal-form account-details-panel" hidden></div>
 
       <form id="transferForm" class="modal-form" hidden>
         <div class="form-grid">
@@ -658,6 +766,6 @@
   <script src="modules/migrations.js"></script>
   <script src="modules/finance.js"></script>
   <script src="modules/security.js"></script>
-  <script src="app.js?v=37"></script>
+  <script src="app.js?v=40"></script>
 </body>
 </html>

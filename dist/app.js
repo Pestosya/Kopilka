@@ -11,10 +11,14 @@ const { CURRENT_SCHEMA_VERSION, migrateData } = KopilkaMigrations;
 const {
   roundMoney,
   operationAffectsAnalytics,
+  operationAnalyticsImpact,
   transferFee,
   calculateAccountBalance,
   calculateAccountsTotal,
   calculateTransferFeesTotal,
+  creditDebt,
+  creditOverpayment,
+  availableCredit,
   simulateDebtStrategy
 } = KopilkaFinance;
 const {
@@ -64,8 +68,8 @@ const DEFAULT_STATE = {
   },
   accounts: [{
     id: "account-main",
-    name: "Основной счёт",
-    type: "current",
+    name: "Основная карта",
+    type: "debit_card",
     bankName: "",
     currency: "₽",
     includeInTotal: true,
@@ -75,6 +79,18 @@ const DEFAULT_STATE = {
     isArchived: false,
     color: "",
     icon: "",
+    lastFourDigits: "",
+    paymentSystem: "mir",
+    isVirtual: false,
+    expirationDate: "",
+    creditLimit: 0,
+    minimumPayment: 0,
+    paymentDueDate: "",
+    interestRate: 0,
+    gracePaymentAmount: 0,
+    isLegacy: false,
+    isMigrated: false,
+    numberMissing: true,
     createdAt: "",
     updatedAt: ""
   }],
@@ -230,11 +246,18 @@ function isValidEmail(value) {
   return email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
 }
 
-const ACCOUNT_TYPES = ["current", "savings", "deposit", "cash", "wallet", "credit", "investment", "other"];
-const LEGACY_ACCOUNT_TYPE_MAP = { card: "current" };
+const ACCOUNT_TYPES = ["debit_card", "credit_card", "savings", "cash", "wallet"];
+const LEGACY_ACCOUNT_TYPE_MAP = {
+  card: "debit_card",
+  current: "debit_card",
+  credit: "credit_card",
+  deposit: "savings",
+  investment: "wallet",
+  other: "wallet"
+};
 const CARD_TYPES = ["debit", "credit"];
 const PAYMENT_SYSTEMS = ["mir", "visa", "mastercard", "unionpay", "other"];
-const TRANSACTION_TYPES = ["income", "expense", "transfer", "initial_balance", "balance_adjustment", "fee"];
+const TRANSACTION_TYPES = ["income", "expense", "refund", "transfer", "initial_balance", "balance_adjustment", "fee"];
 
 function emailDisplayName(email) {
   return normalizeEmail(email).split("@")[0] || "Пользователь";
@@ -274,7 +297,7 @@ function normalizeDebtRecord(item) {
 
 function normalizeAccountType(type) {
   const mapped = LEGACY_ACCOUNT_TYPE_MAP[type] || type;
-  return ACCOUNT_TYPES.includes(mapped) ? mapped : "current";
+  return ACCOUNT_TYPES.includes(mapped) ? mapped : "debit_card";
 }
 
 function normalizeTransactionType(type) {
@@ -308,11 +331,28 @@ function normalizeAccount(item, index = 0) {
     currency: item?.currency || "₽",
     includeInTotal: item?.includeInTotal !== false,
     includeInSafetyFund: item?.includeInSafetyFund === true,
-    allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit",
+    allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit_card",
     hideBalance: item?.hideBalance === true,
     isArchived: item?.isArchived === true,
     color: item?.color || "",
     icon: item?.icon || "",
+    lastFourDigits: explicitLastFourDigits(item),
+    paymentSystem: normalizePaymentSystem(item?.paymentSystem),
+    isVirtual: item?.isVirtual === true,
+    expirationDate: item?.expirationDate || "",
+    creditLimit: Math.max(0, Number(item?.creditLimit || 0)),
+    minimumPayment: Math.max(0, Number(item?.minimumPayment || 0)),
+    paymentDueDate: item?.paymentDueDate || "",
+    interestRate: Math.max(0, Number(item?.interestRate || 0)),
+    gracePaymentAmount: Math.max(0, Number(item?.gracePaymentAmount || 0)),
+    goalName: item?.goalName || "",
+    goalAmount: Math.max(0, Number(item?.goalAmount || 0)),
+    nextInterestDate: item?.nextInterestDate || "",
+    monthlyInterestIncome: Math.max(0, Number(item?.monthlyInterestIncome || 0)),
+    legacyType: item?.legacyType || (["investment", "other"].includes(item?.type) ? item.type : ""),
+    isLegacy: item?.isLegacy === true,
+    isMigrated: item?.isMigrated === true,
+    numberMissing: item?.numberMissing === true || (type === "debit_card" || type === "credit_card") && !explicitLastFourDigits(item),
     createdAt: item?.createdAt || isoToday(),
     updatedAt: item?.updatedAt || item?.createdAt || isoToday()
   };
@@ -350,7 +390,7 @@ function normalizeOperationRecord(item, fallbackAccountId = "") {
     amount: Number(item?.amount || 0),
     category: item?.category || (type === "initial_balance" ? "Начальный остаток" : "Другое"),
     accountId: item?.accountId || fallbackAccountId,
-    cardId: item?.cardId || "",
+    cardId: "",
     description: item?.description || item?.note || "",
     note: item?.note || item?.description || "",
     date: item?.date || isoToday(),
@@ -420,16 +460,12 @@ function hydrateState(data = {}) {
     accounts = (legacyNames.length ? legacyNames : ["Основная карта"]).map((name, index) => normalizeAccount({
       id: index === 0 ? "account-main" : "",
       name,
-      type: index === 0 ? "current" : "cash",
+      type: index === 0 ? "debit_card" : "cash",
       currency: settings.currency || "₽"
     }, index));
   }
 
   const accountIds = new Set(accounts.map(account => account.id));
-  const cards = (Array.isArray(data.cards) ? data.cards : [])
-    .map(normalizeCard)
-    .filter(card => accountIds.has(card.accountId));
-  const cardIds = new Set(cards.map(card => card.id));
   const operations = (Array.isArray(data.operations) ? data.operations : [])
     .map(item => normalizeOperationRecord(item, accounts[0]?.id || ""))
     .map(operation => {
@@ -437,8 +473,7 @@ function hydrateState(data = {}) {
       operation.accountId = accountIds.has(operation.accountId)
         ? operation.accountId
         : (byLegacyName?.id || accounts[0].id);
-      const card = cards.find(item => item.id === operation.cardId);
-      if (!card || card.accountId !== operation.accountId) operation.cardId = "";
+      operation.cardId = "";
       operation.account = accounts.find(account => account.id === operation.accountId)?.name || accounts[0].name;
       return operation;
     });
@@ -457,9 +492,7 @@ function hydrateState(data = {}) {
     .map(item => ({ ...item, accountId: accountIds.has(item.accountId) ? item.accountId : accounts[0].id }))
     .filter(item => item.amount > 0);
 
-  settings.openingBalance = Number(operations.find(item =>
-    item.accountId === accounts[0]?.id && item.type === "initial_balance"
-  )?.amount || 0);
+  settings.openingBalance = 0;
   if (data.settings?.profileCreated === undefined) {
     settings.profileCreated = Boolean(settings.login || settings.name || operations.length || (data.debts || []).length);
   }
@@ -470,7 +503,7 @@ function hydrateState(data = {}) {
     settings,
     categories: { ...DEFAULT_STATE.categories, ...(data.categories || {}) },
     accounts,
-    cards,
+    cards: [],
     transfers,
     recurring,
     operations,
@@ -609,7 +642,7 @@ function migrateLegacy(legacy) {
     settings: {
       profileCreated: true,
       currency: legacy.settings?.currency || "₽",
-      openingBalance: Number(legacy.settings?.opening || 0),
+      opening: Number(legacy.settings?.opening || 0),
       reserveTarget: Number(legacy.settings?.reserve || 300000)
     },
     operations: (legacy.ops || []).map(item => ({
@@ -1103,24 +1136,26 @@ function accountName(id) {
 
 function accountTypeName(type) {
   return {
-    current: "Текущий счёт",
+    debit_card: "Дебетовая карта",
+    credit_card: "Кредитная карта",
     savings: "Накопительный счёт",
-    deposit: "Вклад",
     cash: "Наличные",
     wallet: "Электронный кошелёк",
-    credit: "Кредитный счёт",
-    investment: "Инвестиционный счёт",
-    other: "Другой счёт",
-    card: "Банковская карта"
-  }[type] || "Текущий счёт";
+    current: "Дебетовая карта",
+    card: "Дебетовая карта",
+    credit: "Кредитная карта",
+    deposit: "Накопительный счёт",
+    investment: "Электронный кошелёк",
+    other: "Электронный кошелёк"
+  }[type] || "Дебетовая карта";
 }
 
 function accountIcon(type) {
   if (type === "cash") return "₽";
-  if (type === "savings" || type === "deposit") return "◇";
+  if (type === "savings") return "◇";
   if (type === "wallet") return "◉";
-  if (type === "credit") return "−";
-  return "▣";
+  if (type === "credit_card") return "−";
+  return "▤";
 }
 
 function accountDisplayIcon(account) {
@@ -1129,9 +1164,9 @@ function accountDisplayIcon(account) {
 
 function accountVisualClass(type) {
   if (type === "cash") return "cash";
-  if (type === "savings" || type === "deposit") return "savings";
+  if (type === "savings") return "savings";
   if (type === "wallet") return "wallet";
-  if (type === "credit") return "credit";
+  if (type === "credit_card") return "credit";
   return "card";
 }
 
@@ -1139,20 +1174,22 @@ function activeAccounts() {
   return state.accounts.filter(account => account.isArchived !== true);
 }
 
-function cardsForAccount(accountId, includeArchived = false) {
-  return state.cards.filter(card =>
-    card.accountId === accountId && (includeArchived || card.isArchived !== true)
-  );
+function isCardProduct(account) {
+  return account?.type === "debit_card" || account?.type === "credit_card";
 }
 
-function cardDisplayName(card) {
-  if (!card) return "";
-  const digits = card.lastFourDigits ? `•••• ${card.lastFourDigits}` : "Карта без номера";
-  return card.name && card.name !== "Карта" ? `${card.name} · ${digits}` : digits;
+function isCreditProduct(account) {
+  return account?.type === "credit_card";
 }
 
-function cardNumberLabel(card) {
-  return card?.lastFourDigits ? `•••• ${card.lastFourDigits}` : "Карта без номера";
+function cardDisplayName(product) {
+  if (!product || !isCardProduct(product)) return "";
+  const digits = cardNumberLabel(product);
+  return product.name && product.name !== "Карта" ? `${product.name} · ${digits}` : digits;
+}
+
+function cardNumberLabel(product) {
+  return product?.lastFourDigits ? `•••• ${product.lastFourDigits}` : "Карта без номера";
 }
 
 function cardPaymentSystemName(value) {
@@ -1166,11 +1203,11 @@ function cardPaymentSystemName(value) {
 }
 
 function cardTypeName(value) {
-  return value === "credit" ? "Кредитная" : "Дебетовая";
+  return value === "credit" || value === "credit_card" ? "Кредитная" : "Дебетовая";
 }
 
-function cardFormatName(card) {
-  return card?.isVirtual ? "Виртуальная" : "Физическая";
+function cardFormatName(product) {
+  return product?.isVirtual ? "Виртуальная" : "Физическая";
 }
 
 function accountColorClass(value) {
@@ -1191,20 +1228,17 @@ function accountMoney(account, value, compact = false) {
 }
 
 function ownAccountsBalance() {
-  return roundMoney(activeAccounts()
-    .filter(account => account.includeInTotal !== false && account.type !== "credit")
-    .reduce((sum, account) => sum + accountBalance(account.id), 0));
+  return totalAccountsBalance();
 }
 
 function creditAccountsDebt() {
   return roundMoney(activeAccounts()
-    .filter(account => account.type === "credit")
-    .reduce((sum, account) => sum + Math.abs(Math.min(0, accountBalance(account.id))), 0));
+    .filter(account => isCreditProduct(account))
+    .reduce((sum, account) => sum + creditDebt(account, state.operations, state.transfers), 0));
 }
 
 function activeCards() {
-  const activeAccountIds = new Set(activeAccounts().map(account => account.id));
-  return state.cards.filter(card => card.isArchived !== true && activeAccountIds.has(card.accountId));
+  return activeAccounts().filter(isCardProduct);
 }
 
 function accountStatusLabel(account) {
@@ -1379,21 +1413,22 @@ function totals() {
 
   state.operations.forEach(operation => {
     if (!operationAffectsAnalytics(operation)) return;
-    const amount = Number(operation.amount || 0);
-    const isIncome = operation.type === "income";
-    const sign = isIncome ? 1 : -1;
-    if (operation.type === "income") allIncome += amount;
-    else allExpense += amount;
+    const impact = operationAnalyticsImpact(operation);
+    const income = impact.income;
+    const expense = impact.expense;
+    allIncome += income;
+    allExpense += expense;
     if (String(operation.date).slice(0, 7) === currentMonth) {
-      if (isIncome) {
-        monthIncome += amount;
+      if (income > 0) {
+        monthIncome += income;
         incomeCount += 1;
-      } else {
-        monthExpense += amount;
+      }
+      if (expense !== 0) {
+        monthExpense += expense;
         expenseCount += 1;
       }
     }
-    if (String(operation.date).slice(0, 7) === previousMonth) previousNet += sign * amount;
+    if (String(operation.date).slice(0, 7) === previousMonth) previousNet += income - expense;
   });
 
   state.transfers.forEach(transfer => {
@@ -1441,6 +1476,7 @@ function visualFor(category, type) {
   if (type === "initial_balance") return ["＋", "sky"];
   if (type === "balance_adjustment") return ["≈", "lilac"];
   if (type === "fee") return ["−", "coral"];
+  if (type === "refund") return ["↩", "mint"];
   return categoryVisuals[category] || [type === "income" ? "↗" : "↘", type === "income" ? "mint" : "coral"];
 }
 
@@ -1448,6 +1484,7 @@ function operationTypeLabel(type) {
   return {
     income: "Доход",
     expense: "Расход",
+    refund: "Возврат",
     fee: "Комиссия",
     initial_balance: "Начальный остаток",
     balance_adjustment: "Корректировка",
@@ -1456,14 +1493,14 @@ function operationTypeLabel(type) {
 }
 
 function operationAmountPrefix(type, amount) {
-  if (type === "income" || type === "initial_balance") return Number(amount || 0) >= 0 ? "+" : "";
+  if (type === "income" || type === "initial_balance" || type === "refund") return Number(amount || 0) >= 0 ? "+" : "";
   if (type === "expense" || type === "fee") return "−";
   if (type === "balance_adjustment") return Number(amount || 0) >= 0 ? "+" : "";
   return "";
 }
 
 function operationAmountClass(type, amount) {
-  if (type === "income") return "income";
+  if (type === "income" || type === "refund") return "income";
   if (type === "expense" || type === "fee") return "expense";
   if (type === "balance_adjustment" && Number(amount || 0) < 0) return "expense";
   return "";
@@ -1615,39 +1652,43 @@ function accountHistory(accountId) {
     transfer.fromAccountId === accountId || transfer.toAccountId === accountId
   );
   const recurringIds = state.recurring.filter(item => item.accountId === accountId);
-  const cardIds = state.cards.filter(card => card.accountId === accountId);
   return {
     operations: operationIds,
     transfers: transferIds,
     recurring: recurringIds,
-    cards: cardIds,
-    hasAny: operationIds.length > 0 || transferIds.length > 0 || recurringIds.length > 0 || cardIds.length > 0
+    hasAny: operationIds.length > 0 || transferIds.length > 0 || recurringIds.length > 0
   };
 }
 
 function visibleAccountsForFilter() {
   const accounts = accountFilter === "archive" ? state.accounts.filter(account => account.isArchived) : activeAccounts();
-  if (accountFilter === "accounts") return accounts.filter(account => account.type !== "cash");
-  if (accountFilter === "cards") return accounts.filter(account => cardsForAccount(account.id, accountFilter === "archive").length > 0);
+  if (accountFilter === "accounts") return accounts.filter(account => account.type === "savings" || account.type === "wallet");
+  if (accountFilter === "cards") return accounts.filter(isCardProduct);
+  if (accountFilter === "debit_cards") return accounts.filter(account => account.type === "debit_card");
+  if (accountFilter === "credit_cards") return accounts.filter(account => account.type === "credit_card");
+  if (accountFilter === "savings") return accounts.filter(account => account.type === "savings");
   if (accountFilter === "cash") return accounts.filter(account => account.type === "cash");
+  if (accountFilter === "wallet") return accounts.filter(account => account.type === "wallet");
   return accounts;
 }
 
 function accountEmptyMessage() {
   if (accountFilter === "archive") return ["Архив пуст", "Архивированные счета появятся здесь"];
-  if (accountFilter === "cards") return ["Нет карт", "Добавьте карту и привяжите её к счёту"];
+  if (accountFilter === "cards" || accountFilter === "debit_cards") return ["Нет карт", "Добавьте самостоятельную дебетовую карту"];
+  if (accountFilter === "credit_cards") return ["Нет кредитных карт", "Добавьте кредитную карту с лимитом"];
+  if (accountFilter === "savings") return ["Нет накопительных счетов", "Добавьте счёт для цели или сбережений"];
   if (accountFilter === "cash") return ["Нет наличных", "Добавьте кошелёк для наличных"];
-  if (accountFilter === "accounts") return ["Нет счетов", "Добавьте банковский, накопительный или электронный счёт"];
-  return ["Нет счетов", "Добавьте первый счёт, карту или наличные"];
+  if (accountFilter === "wallet") return ["Нет кошельков", "Добавьте электронный кошелёк"];
+  if (accountFilter === "accounts") return ["Нет счетов", "Добавьте накопительный счёт или электронный кошелёк"];
+  return ["Нет продуктов", "Добавьте первую карту, счёт, наличные или кошелёк"];
 }
 
 function accountActivityItems(mode = accountActivityFilter) {
   const operations = state.operations.map(operation => {
     const amount = Number(operation.amount || 0);
-    const isIncome = operation.type === "income";
-    const isExpense = operation.type === "expense" || operation.type === "fee";
     const isNeutral = operation.type === "initial_balance" || operation.type === "balance_adjustment";
-    const card = state.cards.find(item => item.id === operation.cardId);
+    const account = accountById(operation.accountId);
+    const amountClass = operationAmountClass(operation.type, amount) || "neutral";
     const prefix = isNeutral
       ? (operation.type === "balance_adjustment" && amount < 0 ? "− " : "")
       : `${operationAmountPrefix(operation.type, amount)} `;
@@ -1660,11 +1701,11 @@ function accountActivityItems(mode = accountActivityFilter) {
       title: operation.note || operation.category || operationTypeLabel(operation.type),
       category: operation.category || operationTypeLabel(operation.type),
       account: accountName(operation.accountId),
-      card: card ? cardDisplayName(card) : "",
+      card: isCardProduct(account) ? cardDisplayName(account) : "",
       typeLabel: operationTypeLabel(operation.type),
       amount: `${prefix}${money(Math.abs(amount))}`,
-      amountClass: isIncome ? "income" : (isExpense ? "expense" : "neutral"),
-      canDelete: operation.type === "income" || operation.type === "expense",
+      amountClass,
+      canDelete: operation.type === "income" || operation.type === "expense" || operation.type === "refund",
       rawId: operation.id
     };
   });
@@ -1702,6 +1743,72 @@ function latestAccountActivity(accountId) {
     })[0];
 }
 
+function accountLocalActivityItems(accountId) {
+  const operationItems = state.operations
+    .filter(operation => operation.accountId === accountId)
+    .map(operation => {
+      const amount = Number(operation.amount || 0);
+      return {
+        id: operation.id,
+        sortKey: operationTimestamp(operation),
+        title: operation.note || operation.category || operationTypeLabel(operation.type),
+        meta: `${formatDate(operation.date, true)} · ${operation.category || operationTypeLabel(operation.type)}`,
+        amount: `${operationAmountPrefix(operation.type, amount)} ${money(Math.abs(amount))}`,
+        amountClass: operationAmountClass(operation.type, amount) || "neutral"
+      };
+    });
+  const transferItems = state.transfers
+    .filter(transfer => transfer.fromAccountId === accountId || transfer.toAccountId === accountId)
+    .map(transfer => {
+      const isOutgoing = transfer.fromAccountId === accountId;
+      const fee = isOutgoing ? transferFee(transfer) : 0;
+      const total = Number(transfer.amount || 0) + fee;
+      return {
+        id: transfer.id,
+        sortKey: operationTimestamp(transfer),
+        title: transfer.note || (isOutgoing ? `Перевод на ${accountName(transfer.toAccountId)}` : `Перевод с ${accountName(transfer.fromAccountId)}`),
+        meta: fee ? `${formatDate(transfer.date, true)} · перевод · комиссия ${money(fee)}` : `${formatDate(transfer.date, true)} · перевод`,
+        amount: `${isOutgoing ? "−" : "+"} ${money(total)}`,
+        amountClass: "neutral"
+      };
+    });
+  return [...operationItems, ...transferItems].sort((a, b) => String(b.sortKey).localeCompare(String(a.sortKey)));
+}
+
+function accountProductMetrics(account, balance, history) {
+  const updated = formatDate(accountUpdatedDate(account), true);
+  if (isCreditProduct(account)) {
+    const debt = creditDebt(account, state.operations, state.transfers);
+    const overpayment = creditOverpayment(account, state.operations, state.transfers);
+    return [
+      ["Кредитный лимит", accountMoney(account, Number(account.creditLimit || 0))],
+      ["Доступно", accountMoney(account, availableCredit(account, state.operations, state.transfers))],
+      ["Переплата", accountMoney(account, overpayment)],
+      ["Минимальный платёж", account.minimumPayment ? accountMoney(account, account.minimumPayment) : "Не задан"],
+      ["Дата платежа", account.paymentDueDate || "Не задана"],
+      ["Текущий долг", accountMoney(account, debt)]
+    ];
+  }
+  if (account.type === "debit_card") {
+    return [
+      ["Номер", cardNumberLabel(account)],
+      ["Платёжная система", cardPaymentSystemName(account.paymentSystem)],
+      ["Формат", cardFormatName(account)],
+      ["Операций", String(history.operations.length)],
+      ["Обновлено", updated],
+      ["Валюта", account.currency || state.settings.currency]
+    ];
+  }
+  return [
+    ["Баланс", accountMoney(account, balance)],
+    ["Операций", String(history.operations.length)],
+    ["Переводов", String(history.transfers.length)],
+    ["Обновлено", updated],
+    ["Валюта", account.currency || state.settings.currency],
+    ["Финподушка", account.includeInSafetyFund ? "Учитывается" : "Не учитывается"]
+  ];
+}
+
 function renderAccountCards(accounts) {
   const target = document.querySelector("#accountCards");
   if (!accounts.length) {
@@ -1712,19 +1819,26 @@ function renderAccountCards(accounts) {
 
   target.innerHTML = accounts.map(account => {
     const balance = accountBalance(account.id);
-    const accountCards = cardsForAccount(account.id, accountFilter === "archive")
-      .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || String(a.name).localeCompare(String(b.name), "ru"));
+    const isCredit = isCreditProduct(account);
+    const mainAmount = isCredit ? creditDebt(account, state.operations, state.transfers) : balance;
+    const amountLabel = isCredit ? "Задолженность" : "Баланс";
     const lastActivity = latestAccountActivity(account.id);
     const history = accountHistory(account.id);
+    const localActivity = accountLocalActivityItems(account.id).slice(0, 3);
     const updatedAt = accountUpdatedDate(account);
     const colorClass = accountColorClass(account.color) || accountVisualClass(account.type);
-    const cardList = accountCards.length
-      ? accountCards.map(card => `<button class="account-linked-card ${accountColorClass(card.color)} ${card.isArchived ? "archived" : ""}" type="button" data-edit-card="${escapeHtml(card.id)}">
-          <span>${escapeHtml(cardPaymentSystemName(card.paymentSystem))}</span>
-          <b>${escapeHtml(cardNumberLabel(card))}</b>
-          <small>${escapeHtml(card.name)} · ${escapeHtml(cardTypeName(card.cardType))} · ${escapeHtml(cardFormatName(card))}${card.expirationDate ? ` · до ${escapeHtml(card.expirationDate)}` : ""}</small>
-        </button>`).join("")
-      : `<div class="account-no-cards">Карт нет</div>`;
+    const cardMeta = isCardProduct(account)
+      ? ` · ${escapeHtml(cardPaymentSystemName(account.paymentSystem))} · ${escapeHtml(cardNumberLabel(account))} · ${escapeHtml(cardFormatName(account))}`
+      : "";
+    const productMetrics = accountProductMetrics(account, balance, history)
+      .map(([label, value]) => `<span>${escapeHtml(label)}<b>${escapeHtml(value)}</b></span>`)
+      .join("");
+    const localActivityMarkup = localActivity.length
+      ? localActivity.map(item => `<div class="account-local-operation">
+          <span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.meta)}</small></span>
+          <strong class="${escapeHtml(item.amountClass)} sensitive">${escapeHtml(item.amount)}</strong>
+        </div>`).join("")
+      : `<div class="account-no-cards">Операций по продукту пока нет</div>`;
     return `<article class="account-row ${colorClass} ${account.isArchived ? "archived" : ""}">
       <div class="account-row-main">
         <span class="account-row-icon">${escapeHtml(accountDisplayIcon(account))}</span>
@@ -1733,11 +1847,11 @@ function renderAccountCards(accounts) {
             <b>${escapeHtml(account.name)}</b>
             <span>${escapeHtml(accountStatusLabel(account))}</span>
           </div>
-          <small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))}</small>
+          <small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))}${cardMeta}</small>
         </div>
         <div class="account-row-balance">
-          <b class="sensitive ${account.hideBalance ? "account-private-amount" : ""}">${accountMoney(account, balance)}</b>
-          <small>${escapeHtml(account.currency || state.settings.currency)} · обновлён ${formatDate(updatedAt, true)}</small>
+          <b class="sensitive ${account.hideBalance ? "account-private-amount" : ""}">${accountMoney(account, mainAmount)}</b>
+          <small>${escapeHtml(amountLabel)} · обновлён ${formatDate(updatedAt, true)}</small>
         </div>
         <div class="account-menu-wrap">
           <button class="account-menu-button" type="button" data-account-menu="${escapeHtml(account.id)}" aria-label="Меню счёта">•••</button>
@@ -1753,13 +1867,22 @@ function renderAccountCards(accounts) {
           </div>
         </div>
       </div>
+      <div class="account-row-quick-actions">
+        <button type="button" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">${isCredit ? "Покупка" : "Операция"}</button>
+        <button type="button" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">${isCredit ? "Внести платёж" : "Перевести"}</button>
+        <button type="button" data-account-action="open" data-account-id="${escapeHtml(account.id)}">История</button>
+      </div>
       <div class="account-row-details">
-        <div class="account-cards-block">
-          <span>Привязанные карты (${accountCards.length})</span>
-          <div class="account-linked-cards">${cardList}</div>
+        <div class="account-cards-block account-product-block">
+          <span>Показатели продукта</span>
+          <div class="account-product-grid">${productMetrics}</div>
+        </div>
+        <div class="account-last-operation account-local-operations">
+          <span>Последние операции</span>
+          ${localActivityMarkup}
         </div>
         <div class="account-last-operation">
-          <span>Последняя операция</span>
+          <span>Свежая запись</span>
           ${lastActivity ? `<b>${escapeHtml(lastActivity.title)}</b><small>${escapeHtml(lastActivity.typeLabel)} · ${formatDate(lastActivity.date, true)} · ${escapeHtml(lastActivity.category)}</small>` : "<b>Операций нет</b><small>История появится после первой записи</small>"}
         </div>
         <div class="account-row-meta">
@@ -1808,7 +1931,7 @@ function renderAccounts() {
   const cardCount = activeCards().length;
   document.querySelector("#accountsTotal").textContent = money(ownAccountsBalance());
   document.querySelector("#accountsCount").textContent =
-    `${accountCount} ${plural(accountCount, ["счёт", "счёта", "счетов"])} · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}`;
+    `${accountCount} ${plural(accountCount, ["объект", "объекта", "объектов"])} · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}`;
   document.querySelector("#accountsActiveCount").textContent = accountCount;
   document.querySelector("#accountsCardCount").textContent = cardCount;
   document.querySelector("#accountsDebtTotal").textContent = money(creditAccountsDebt());
@@ -2115,8 +2238,9 @@ function monthBuckets() {
     if (!operationAffectsAnalytics(operation)) return;
     const bucket = months.find(month => month.key === String(operation.date).slice(0, 7));
     if (!bucket) return;
-    if (operation.type === "income") bucket.income += Number(operation.amount || 0);
-    else bucket.expense += Math.abs(Number(operation.amount || 0));
+    const impact = operationAnalyticsImpact(operation);
+    bucket.income += impact.income;
+    bucket.expense += impact.expense;
   });
   state.transfers.forEach(transfer => {
     const fee = transferFee(transfer);
@@ -2131,8 +2255,9 @@ function monthOperationTotals(key, predicate = () => true) {
   const totals = state.operations
     .filter(operation => operationAffectsAnalytics(operation) && String(operation.date).slice(0, 7) === key && predicate(operation))
     .reduce((result, operation) => {
-      if (operation.type === "income") result.income += Number(operation.amount || 0);
-      else result.expense += Math.abs(Number(operation.amount || 0));
+      const impact = operationAnalyticsImpact(operation);
+      result.income += impact.income;
+      result.expense += impact.expense;
       return result;
     }, { income: 0, expense: 0 });
   totals.expense += calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === key);
@@ -2336,10 +2461,12 @@ function renderAnalytics() {
       && operation.type !== "income"
       && String(operation.date).slice(0, 7) === currentMonth
     )
-    .forEach(operation => { categories[operation.category] = (categories[operation.category] || 0) + Math.abs(Number(operation.amount || 0)); });
+    .forEach(operation => {
+      categories[operation.category] = (categories[operation.category] || 0) + operationAnalyticsImpact(operation).expense;
+    });
   const transferFees = calculateTransferFeesTotal(state.transfers, transfer => String(transfer.date).slice(0, 7) === currentMonth);
   if (transferFees > 0) categories["Комиссии"] = (categories["Комиссии"] || 0) + transferFees;
-  const entries = Object.entries(categories).sort((a, b) => b[1] - a[1]).slice(0, 7);
+  const entries = Object.entries(categories).filter(entry => entry[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 7);
   const total = entries.reduce((sum, entry) => sum + entry[1], 0);
   const colors = ["#6c5ce7", "#ff735f", "#20b987", "#4d9de0", "#f7b731", "#a18cf2", "#ee8a78"];
   document.querySelector("#categoryChart").innerHTML = entries.length
@@ -2357,7 +2484,6 @@ function renderAnalytics() {
 function renderSettings() {
   document.querySelector("#userName").value = state.settings.name;
   document.querySelector("#userEmail").value = state.settings.email || "";
-  document.querySelector("#openingBalance").value = initialBalanceAmount(state.accounts[0]?.id);
   document.querySelector("#reserveTarget").value = state.settings.reserveTarget;
   document.querySelector("#reserveSaved").value = state.settings.reserveSaved;
   document.querySelector("#currency").value = state.settings.currency;
@@ -2701,7 +2827,10 @@ function showPage(pageId) {
 
 function fillCategorySelect(type) {
   const select = document.querySelector("#operationCategory");
-  select.innerHTML = state.categories[type].map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`).join("");
+  const sourceType = type === "refund" ? "expense" : type;
+  select.innerHTML = (state.categories[sourceType] || state.categories.expense)
+    .map(category => `<option value="${escapeHtml(category)}">${escapeHtml(category)}</option>`)
+    .join("");
 }
 
 function fillRecurringCategory(type, selected = "") {
@@ -2726,19 +2855,8 @@ function fillAccountSelects() {
   fillAccountSelect(document.querySelector("#operationAccount"));
   fillAccountSelect(document.querySelector("#transferFrom"));
   fillAccountSelect(document.querySelector("#transferTo"));
-  const cardAccount = document.querySelector("#cardAccount");
-  if (cardAccount) fillCardAccountSelect(cardAccount);
   const paymentAccount = document.querySelector("#paymentAccount");
   if (paymentAccount) fillAccountSelect(paymentAccount);
-}
-
-function fillCardAccountSelect(select, selectedId = "") {
-  const current = selectedId || select.value || activeAccounts()[0]?.id || state.accounts[0]?.id || "";
-  const options = activeAccounts().length ? activeAccounts() : state.accounts;
-  select.innerHTML = options.map(account =>
-    `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} · ${escapeHtml(accountTypeName(account.type))}</option>`
-  ).join("");
-  select.value = options.some(account => account.id === current) ? current : (options[0]?.id || "");
 }
 
 function hideModalForms() {
@@ -2790,15 +2908,16 @@ function openRecurringModal(item = null) {
 
 function openOperationModal(type, operation = null, preferredAccountId = "") {
   const isIncome = type === "income";
-  document.querySelector("#modalKicker").textContent = isIncome ? "НОВЫЙ ДОХОД" : "НОВЫЙ РАСХОД";
-  document.querySelector("#modalTitle").textContent = operation ? "Изменить операцию" : (isIncome ? "Добавить доход" : "Добавить расход");
+  const isRefund = type === "refund";
+  document.querySelector("#modalKicker").textContent = isRefund ? "ВОЗВРАТ" : (isIncome ? "НОВЫЙ ДОХОД" : "НОВЫЙ РАСХОД");
+  document.querySelector("#modalTitle").textContent = operation ? "Изменить операцию" : (type === "refund" ? "Добавить возврат" : (isIncome ? "Добавить доход" : "Добавить расход"));
   hideModalForms();
   document.querySelector("#operationForm").hidden = false;
   document.querySelector("#operationId").value = operation?.id || "";
   document.querySelector("#operationType").value = type;
   document.querySelector("#operationAmount").value = operation?.amount || "";
-  document.querySelector("#amountSign").textContent = isIncome ? "+" : "−";
-  document.querySelector("#amountSign").style.color = isIncome ? "var(--mint)" : "var(--coral)";
+  document.querySelector("#amountSign").textContent = isIncome || type === "refund" ? "+" : "−";
+  document.querySelector("#amountSign").style.color = isIncome || type === "refund" ? "var(--mint)" : "var(--coral)";
   document.querySelector("#operationDate").value = operation?.date || isoToday();
   fillAccountSelect(document.querySelector("#operationAccount"), operation?.accountId || preferredAccountId);
   document.querySelector("#operationNote").value = operation?.note || "";
@@ -2831,37 +2950,38 @@ function openAccountModal(account = null, defaults = {}) {
   document.querySelector("#accountIconValue").value = draft?.icon || "";
   document.querySelector("#accountIncludeInTotal").checked = draft?.includeInTotal !== false;
   document.querySelector("#accountIncludeInSafetyFund").checked = draft?.includeInSafetyFund === true;
-  document.querySelector("#accountAllowNegative").checked = draft?.allowNegativeBalance === true || draft?.type === "credit";
+  document.querySelector("#accountAllowNegative").checked = draft?.allowNegativeBalance === true || draft?.type === "credit_card";
   document.querySelector("#accountHideBalance").checked = draft?.hideBalance === true;
-  setAccountType(draft?.type || "current");
+  setAccountType(draft?.type || "savings");
   openModal();
   setTimeout(() => document.querySelector("#accountName").focus(), 100);
 }
 
-function openCardModal(card = null, defaults = {}) {
-  const accounts = activeAccounts();
-  if (!accounts.length && !state.accounts.length) {
-    showToast("Сначала добавьте счёт для карты");
-    openAccountModal(null, { type: "current" });
-    return;
-  }
-  const draft = card || defaults;
+function openCardModal(product = null, defaults = {}) {
+  const draft = product || defaults;
+  const cardKind = draft?.type === "credit_card" || draft?.cardType === "credit" ? "credit" : "debit";
   hideModalForms();
   document.querySelector("#modalKicker").textContent = "КАРТА";
-  document.querySelector("#modalTitle").textContent = card ? "Изменить карту" : "Добавить карту";
+  document.querySelector("#modalTitle").textContent = product ? "Изменить карту" : "Добавить карту";
   document.querySelector("#cardForm").hidden = false;
-  document.querySelector("#cardId").value = card?.id || "";
+  document.querySelector("#cardId").value = product?.id || "";
   document.querySelector("#cardName").value = draft?.name || "Карта";
+  if (document.querySelector("#cardBank")) document.querySelector("#cardBank").value = draft?.bankName || "";
+  if (document.querySelector("#cardCurrency")) document.querySelector("#cardCurrency").value = draft?.currency || state.settings.currency || "₽";
+  if (document.querySelector("#cardOpeningBalance")) {
+    const initial = Number(product ? initialBalanceAmount(product.id) : 0);
+    document.querySelector("#cardOpeningBalance").value = cardKind === "credit" ? Math.abs(Math.min(0, initial)) : initial;
+  }
   document.querySelector("#cardLastFour").value = draft?.lastFourDigits || "";
   document.querySelector("#cardPaymentSystem").value = draft?.paymentSystem || "mir";
-  document.querySelector("#cardType").value = draft?.cardType || "debit";
+  document.querySelector("#cardType").value = cardKind;
   document.querySelector("#cardVirtual").value = draft?.isVirtual ? "virtual" : "physical";
-  fillCardAccountSelect(document.querySelector("#cardAccount"), draft?.accountId);
   document.querySelector("#cardExpiration").value = draft?.expirationDate || "";
   document.querySelector("#cardCreditLimit").value = Number(draft?.creditLimit || 0);
-  document.querySelector("#cardPrimary").checked = draft?.isPrimary !== false;
+  if (document.querySelector("#cardIncludeInTotal")) document.querySelector("#cardIncludeInTotal").checked = draft?.includeInTotal !== false;
+  if (document.querySelector("#cardHideBalance")) document.querySelector("#cardHideBalance").checked = draft?.hideBalance === true;
   document.querySelector("#cardColor").value = accountColorClass(draft?.color) || "";
-  document.querySelector("#cardLegacyHint").hidden = !(card?.isLegacy && card?.numberMissing && !card?.lastFourDigits);
+  document.querySelector("#cardLegacyHint").hidden = !(product?.isLegacy && product?.numberMissing && !product?.lastFourDigits);
   openModal();
   setTimeout(() => document.querySelector("#cardName").focus(), 100);
 }
@@ -2870,8 +2990,10 @@ function openAccountDetailsModal(account) {
   if (!account) return;
   hideModalForms();
   const balance = accountBalance(account.id);
-  const accountCards = cardsForAccount(account.id, true);
   const history = accountHistory(account.id);
+  const metrics = accountProductMetrics(account, balance, history)
+    .map(([label, value]) => `<span>${escapeHtml(label)}<b>${escapeHtml(value)}</b></span>`)
+    .join("");
   document.querySelector("#modalKicker").textContent = "СЧЁТ";
   document.querySelector("#modalTitle").textContent = account.name;
   const panel = document.querySelector("#accountDetailsPanel");
@@ -2881,15 +3003,11 @@ function openAccountDetailsModal(account) {
     <div><b class="sensitive">${accountMoney(account, balance)}</b><small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))} · ${escapeHtml(accountStatusLabel(account))}</small></div>
   </div>
   <div class="account-details-grid">
-    <span>Валюта<b>${escapeHtml(account.currency || state.settings.currency)}</b></span>
-    <span>Карт<b>${accountCards.length}</b></span>
-    <span>Операций<b>${history.operations.length}</b></span>
-    <span>Переводов<b>${history.transfers.length}</b></span>
+    ${metrics}
   </div>
   <div class="account-details-actions">
     <button class="button secondary small" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">Добавить операцию</button>
     <button class="button secondary small" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">Перевести</button>
-    <button class="button secondary small" data-create-card="${escapeHtml(account.id)}">Добавить карту</button>
     <button class="button primary small" data-account-action="edit" data-account-id="${escapeHtml(account.id)}">Изменить</button>
   </div>`;
   openModal();
@@ -2913,7 +3031,7 @@ function renderTransferPreview() {
     + (fromAccount?.allowNegativeBalance !== true && amount + fee > balance ? `<br><span class="amount-expense">Не хватает ${money(amount + fee - balance)}</span>` : "");
 }
 
-function openTransferModal(preferredFromId = "") {
+function openTransferModal(preferredFromId = "", preferredToId = "") {
   const accounts = activeAccounts();
   if (accounts.length < 2) {
     showToast("Для перевода добавьте второй счёт");
@@ -2924,8 +3042,13 @@ function openTransferModal(preferredFromId = "") {
   document.querySelector("#modalKicker").textContent = "МЕЖДУ СЧЕТАМИ";
   document.querySelector("#modalTitle").textContent = "Новый перевод";
   document.querySelector("#transferForm").hidden = false;
-  const fromId = accounts.some(account => account.id === preferredFromId) ? preferredFromId : accounts[0].id;
-  const toId = accounts.find(account => account.id !== fromId)?.id || accounts[1].id;
+  const preferredToExists = accounts.some(account => account.id === preferredToId);
+  const fromId = accounts.some(account => account.id === preferredFromId) && preferredFromId !== preferredToId
+    ? preferredFromId
+    : (preferredToExists ? accounts.find(account => account.id !== preferredToId)?.id : accounts[0].id);
+  const toId = preferredToExists && preferredToId !== fromId
+    ? preferredToId
+    : (accounts.find(account => account.id !== fromId)?.id || accounts[1].id);
   fillAccountSelect(document.querySelector("#transferFrom"), fromId);
   fillAccountSelect(document.querySelector("#transferTo"), toId);
   document.querySelector("#transferAmount").value = "";
@@ -3298,24 +3421,31 @@ function createAccountDefaults(type) {
         ? "Накопительный счёт"
         : normalized === "wallet"
           ? "Электронный кошелёк"
-          : "Новый счёт",
+          : normalized === "credit_card"
+            ? "Кредитная карта"
+            : "Дебетовая карта",
     currency: state.settings.currency || "₽",
     includeInTotal: true,
     includeInSafetyFund: normalized === "savings",
-    allowNegativeBalance: normalized === "credit",
+    allowNegativeBalance: normalized === "credit_card",
     hideBalance: false
   };
 }
 
-function createCardDefaults(accountId = "") {
+function createCardDefaults(cardType = "debit") {
+  const type = cardType === "credit" || cardType === "credit_card" ? "credit_card" : "debit_card";
   return {
-    accountId: accountId || activeAccounts()[0]?.id || state.accounts[0]?.id || "",
-    name: "Карта",
+    type,
+    name: type === "credit_card" ? "Кредитная карта" : "Дебетовая карта",
+    currency: state.settings.currency || "₽",
+    includeInTotal: true,
+    includeInSafetyFund: false,
+    allowNegativeBalance: type === "credit_card",
+    hideBalance: false,
     paymentSystem: "mir",
-    cardType: "debit",
     isVirtual: false,
     creditLimit: 0,
-    isPrimary: true
+    numberMissing: false
   };
 }
 
@@ -3342,14 +3472,13 @@ function deleteAccountSafely(accountId) {
     return;
   }
   if (history.hasAny) {
-    if (confirm("У счёта есть история, переводы или карты. Вместо удаления архивировать его?")) {
+    if (confirm("У объекта есть история, переводы или расписания. Вместо удаления архивировать его?")) {
       archiveAccount(accountId, true);
     }
     return;
   }
   if (!confirm("Удалить этот счёт?")) return;
   state.accounts = state.accounts.filter(item => item.id !== accountId);
-  state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
   saveState();
   renderAll();
   showToast("Счёт удалён");
@@ -3396,8 +3525,14 @@ function handleAccountAction(action, accountId) {
   closeAccountMenus();
   if (action === "open") openAccountDetailsModal(account);
   if (action === "operation") openOperationModal("expense", null, accountId);
-  if (action === "transfer") openTransferModal(accountId);
-  if (action === "edit") openAccountModal(account);
+  if (action === "transfer") {
+    if (isCreditProduct(account)) openTransferModal("", accountId);
+    else openTransferModal(accountId);
+  }
+  if (action === "edit") {
+    if (isCardProduct(account)) openCardModal(account);
+    else openAccountModal(account);
+  }
   if (action === "reconcile") reconcileAccount(accountId);
   if (action === "toggle-total") {
     account.includeInTotal = account.includeInTotal === false;
@@ -3500,8 +3635,8 @@ document.addEventListener("click", event => {
   const createCardButton = event.target.closest("[data-create-card]");
   if (createCardButton) {
     closeAccountsAddMenu();
-    const accountId = createCardButton.dataset.createCard || "";
-    openCardModal(null, createCardDefaults(accountId));
+    const cardType = createCardButton.dataset.createCard || "debit";
+    openCardModal(null, createCardDefaults(cardType));
     return;
   }
 
@@ -3520,8 +3655,8 @@ document.addEventListener("click", event => {
 
   const editCard = event.target.closest("[data-edit-card]");
   if (editCard) {
-    const card = state.cards.find(item => item.id === editCard.dataset.editCard);
-    if (card) openCardModal(card);
+    const product = accountById(editCard.dataset.editCard);
+    if (product && isCardProduct(product)) openCardModal(product);
     return;
   }
 
@@ -3689,9 +3824,10 @@ document.querySelector("#operationForm").addEventListener("submit", event => {
     category: document.querySelector("#operationCategory").value,
     date: document.querySelector("#operationDate").value,
     accountId,
-    cardId: existing?.accountId === accountId ? (existing?.cardId || "") : "",
+    cardId: "",
     account: accountName(accountId),
     note: document.querySelector("#operationNote").value.trim(),
+    relatedOperationId: existing?.relatedOperationId || "",
     createdAt: existing?.createdAt || new Date().toISOString()
   };
   const index = state.operations.findIndex(item => item.id === operation.id);
@@ -3701,7 +3837,7 @@ document.querySelector("#operationForm").addEventListener("submit", event => {
   saveState();
   closeModal();
   renderAll();
-  showToast(operation.type === "income" ? "Доход добавлен" : "Расход добавлен");
+  showToast(operation.type === "income" ? "Доход добавлен" : operation.type === "refund" ? "Возврат добавлен" : "Расход добавлен");
 });
 
 document.querySelector("#recurringKind").addEventListener("change", event => {
@@ -3777,7 +3913,7 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
     bankName: document.querySelector("#accountBank").value.trim(),
     includeInTotal: document.querySelector("#accountIncludeInTotal").checked,
     includeInSafetyFund: document.querySelector("#accountIncludeInSafetyFund").checked,
-    allowNegativeBalance: document.querySelector("#accountAllowNegative").checked || type === "credit",
+    allowNegativeBalance: document.querySelector("#accountAllowNegative").checked || type === "credit_card",
     hideBalance: document.querySelector("#accountHideBalance").checked,
     isArchived: existing?.isArchived === true,
     color: document.querySelector("#accountColor").value,
@@ -3792,7 +3928,6 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
   state.operations.forEach(operation => {
     if (operation.accountId === id) operation.account = account.name;
   });
-  state.settings.openingBalance = initialBalanceAmount(state.accounts[0]?.id);
   saveState();
   closeModal();
   renderAll();
@@ -3806,43 +3941,48 @@ document.querySelector("#cardLastFour").addEventListener("input", event => {
 document.querySelector("#cardForm").addEventListener("submit", event => {
   event.preventDefault();
   const id = document.querySelector("#cardId").value || uid();
-  const existing = state.cards.find(item => item.id === id);
-  const accountId = document.querySelector("#cardAccount").value;
+  const existing = accountById(id);
   const lastFourDigits = document.querySelector("#cardLastFour").value.trim();
-  if (!/^[0-9]{4}$/.test(lastFourDigits)) {
-    showToast("Укажите последние четыре цифры карты");
+  if (lastFourDigits && !/^[0-9]{4}$/.test(lastFourDigits)) {
+    showToast("Укажите четыре цифры карты или оставьте поле пустым");
     document.querySelector("#cardLastFour").focus();
     return;
   }
-  const isPrimary = document.querySelector("#cardPrimary").checked;
-  if (isPrimary) {
-    state.cards.forEach(card => {
-      if (card.accountId === accountId && card.id !== id) card.isPrimary = false;
-    });
-  }
-  const card = normalizeCard({
+  const cardKind = document.querySelector("#cardType").value;
+  const type = cardKind === "credit" ? "credit_card" : "debit_card";
+  const rawInitialBalance = Number(document.querySelector("#cardOpeningBalance")?.value || 0);
+  const initialBalance = type === "credit_card" ? -Math.abs(rawInitialBalance) : rawInitialBalance;
+  const account = normalizeAccount({
     id,
-    accountId,
     name: document.querySelector("#cardName").value.trim(),
+    type,
+    currency: document.querySelector("#cardCurrency")?.value || existing?.currency || state.settings.currency || "₽",
+    bankName: document.querySelector("#cardBank")?.value.trim() || existing?.bankName || "",
+    includeInTotal: document.querySelector("#cardIncludeInTotal")?.checked ?? existing?.includeInTotal ?? true,
+    includeInSafetyFund: false,
+    allowNegativeBalance: type === "credit_card",
+    hideBalance: document.querySelector("#cardHideBalance")?.checked ?? existing?.hideBalance ?? false,
     lastFourDigits,
     paymentSystem: document.querySelector("#cardPaymentSystem").value,
-    cardType: document.querySelector("#cardType").value,
     isVirtual: document.querySelector("#cardVirtual").value === "virtual",
     expirationDate: document.querySelector("#cardExpiration").value.trim(),
     creditLimit: Number(document.querySelector("#cardCreditLimit").value || 0),
-    isPrimary,
     isArchived: existing?.isArchived === true,
     color: document.querySelector("#cardColor").value,
+    icon: existing?.icon || "",
     isLegacy: existing?.isLegacy === true,
     isMigrated: existing?.isMigrated === true,
-    numberMissing: false,
+    numberMissing: !lastFourDigits,
     createdAt: existing?.createdAt || isoToday(),
     updatedAt: isoToday()
   });
-  const index = state.cards.findIndex(item => item.id === id);
-  if (index >= 0) state.cards[index] = card;
-  else state.cards.push(card);
-  touchAccount(accountId);
+  const index = state.accounts.findIndex(item => item.id === id);
+  if (index >= 0) state.accounts[index] = account;
+  else state.accounts.push(account);
+  upsertInitialBalanceOperation(id, initialBalance, existing?.createdAt || account.createdAt || isoToday());
+  state.operations.forEach(operation => {
+    if (operation.accountId === id) operation.account = account.name;
+  });
   saveState();
   closeModal();
   renderAll();
@@ -4169,8 +4309,6 @@ document.querySelector("#settingsForm").addEventListener("submit", event => {
   state.settings.name = document.querySelector("#userName").value.trim();
   state.settings.email = document.querySelector("#userEmail").value.trim();
   state.settings.profileCreated = true;
-  state.settings.openingBalance = Number(document.querySelector("#openingBalance").value || 0);
-  if (state.accounts[0]) upsertInitialBalanceOperation(state.accounts[0].id, state.settings.openingBalance, state.accounts[0].createdAt || isoToday());
   state.settings.reserveTarget = Number(document.querySelector("#reserveTarget").value || 0);
   state.settings.reserveSaved = Number(document.querySelector("#reserveSaved").value || 0);
   state.settings.currency = document.querySelector("#currency").value;

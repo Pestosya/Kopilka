@@ -3,11 +3,11 @@
   if (typeof module === "object" && module.exports) module.exports = api;
   root.KopilkaMigrations = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function () {
-  const CURRENT_SCHEMA_VERSION = 11;
-  const ACCOUNT_TYPES = new Set(["current", "savings", "deposit", "cash", "wallet", "credit", "investment", "other"]);
+  const CURRENT_SCHEMA_VERSION = 12;
+  const ACCOUNT_TYPES = new Set(["debit_card", "credit_card", "savings", "cash", "wallet"]);
   const CARD_TYPES = new Set(["debit", "credit"]);
   const PAYMENT_SYSTEMS = new Set(["mir", "visa", "mastercard", "unionpay", "other"]);
-  const TRANSACTION_TYPES = new Set(["income", "expense", "transfer", "initial_balance", "balance_adjustment", "fee"]);
+  const TRANSACTION_TYPES = new Set(["income", "expense", "refund", "transfer", "initial_balance", "balance_adjustment", "fee"]);
 
   function clone(value) {
     return JSON.parse(JSON.stringify(value || {}));
@@ -36,8 +36,17 @@
   }
 
   function normalizeAccountType(type) {
-    if (type === "card") return "current";
-    return ACCOUNT_TYPES.has(type) ? type : "current";
+    if (type === "card" || type === "current") return "debit_card";
+    if (type === "credit") return "credit_card";
+    if (type === "deposit") return "savings";
+    if (type === "investment" || type === "other") return "wallet";
+    return ACCOUNT_TYPES.has(type) ? type : "debit_card";
+  }
+
+  function legacyTypeFor(item, normalizedType) {
+    const original = item?.legacyType || item?.type || "";
+    if ((original === "investment" || original === "other") && normalizedType === "wallet") return original;
+    return item?.legacyType || "";
   }
 
   function normalizeOperationType(type) {
@@ -68,11 +77,24 @@
       currency: item?.currency || settings.currency || "₽",
       includeInTotal: item?.includeInTotal !== false,
       includeInSafetyFund: item?.includeInSafetyFund === true,
-      allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit",
+      allowNegativeBalance: item?.allowNegativeBalance === true || type === "credit_card",
       hideBalance: item?.hideBalance === true,
       isArchived: item?.isArchived === true,
       color: item?.color || "",
       icon: item?.icon || "",
+      lastFourDigits: explicitLastFourDigits(item),
+      paymentSystem: normalizePaymentSystem(item?.paymentSystem),
+      isVirtual: item?.isVirtual === true,
+      expirationDate: item?.expirationDate || "",
+      creditLimit: Math.max(0, Number(item?.creditLimit || 0)),
+      minimumPayment: Math.max(0, Number(item?.minimumPayment || 0)),
+      paymentDueDate: item?.paymentDueDate || "",
+      interestRate: Math.max(0, Number(item?.interestRate || 0)),
+      gracePaymentAmount: Math.max(0, Number(item?.gracePaymentAmount || 0)),
+      legacyType: legacyTypeFor(item, type),
+      isLegacy: item?.isLegacy === true,
+      isMigrated: item?.isMigrated === true,
+      numberMissing: item?.numberMissing === true || (type === "debit_card" || type === "credit_card") && !explicitLastFourDigits(item),
       createdAt: item?.createdAt || now,
       updatedAt: item?.updatedAt || item?.createdAt || now
     };
@@ -83,7 +105,7 @@
       ...item,
       id: item?.id || `operation-${index + 1}`,
       accountId: item?.accountId || fallbackAccountId,
-      cardId: item?.cardId || "",
+      cardId: "",
       type: normalizeOperationType(item?.type),
       amount: Number(item?.amount || 0),
       category: item?.category || (item?.type === "initial_balance" ? "Начальный остаток" : "Другое"),
@@ -116,6 +138,50 @@
       createdAt: item?.createdAt || now,
       updatedAt: item?.updatedAt || item?.createdAt || now
     };
+  }
+
+  function initialBalanceOperation(account, item) {
+    const date = account.createdAt || item?.createdAt || isoToday();
+    return {
+      id: initialBalanceOperationId(account.id),
+      accountId: account.id,
+      cardId: "",
+      type: "initial_balance",
+      amount: legacyOpeningBalance(item),
+      category: "Начальный остаток",
+      description: "Перенесено из старого стартового баланса",
+      note: "Перенесено из старого стартового баланса",
+      date,
+      isInitialBalance: true,
+      createdAt: date
+    };
+  }
+
+  function ensureInitialBalances(data, legacyAccounts, accounts) {
+    const existingInitialAccounts = new Set(
+      data.operations
+        .filter(operation => operation.type === "initial_balance")
+        .map(operation => operation.accountId)
+    );
+    legacyAccounts.forEach((item, index) => {
+      const account = accounts[index];
+      if (!account || !hasLegacyOpeningBalance(item) || existingInitialAccounts.has(account.id)) return;
+      data.operations.push(initialBalanceOperation(account, item));
+      existingInitialAccounts.add(account.id);
+    });
+  }
+
+  function normalizeInitialBalanceIds(operations) {
+    const seen = new Set();
+    return operations.filter(operation => {
+      if (operation.type !== "initial_balance") return true;
+      if (seen.has(operation.accountId)) return false;
+      seen.add(operation.accountId);
+      operation.id = initialBalanceOperationId(operation.accountId);
+      operation.cardId = "";
+      operation.isInitialBalance = true;
+      return true;
+    });
   }
 
   function inferSchemaVersion(data) {
@@ -277,30 +343,8 @@
         return operation;
       });
 
-      const existingInitialAccounts = new Set(
-        data.operations
-          .filter(operation => operation.type === "initial_balance")
-          .map(operation => operation.accountId)
-      );
-      legacyAccounts.forEach((item, index) => {
-        const account = data.accounts[index];
-        if (!account || !hasLegacyOpeningBalance(item) || existingInitialAccounts.has(account.id)) return;
-        const amount = legacyOpeningBalance(item);
-        data.operations.push({
-          id: initialBalanceOperationId(account.id),
-          accountId: account.id,
-          cardId: "",
-          type: "initial_balance",
-          amount,
-          category: "Начальный остаток",
-          description: "Перенесено из старого стартового баланса",
-          note: "Перенесено из старого стартового баланса",
-          date: account.createdAt || isoToday(),
-          isInitialBalance: true,
-          createdAt: account.createdAt || isoToday()
-        });
-        existingInitialAccounts.add(account.id);
-      });
+      ensureInitialBalances(data, legacyAccounts, data.accounts);
+      data.operations = normalizeInitialBalanceIds(data.operations);
 
       data.transfers = data.transfers
         .map((item, index) => ({
@@ -318,6 +362,87 @@
           && accountIds.has(item.fromAccountId)
           && accountIds.has(item.toAccountId));
 
+      data.settings.openingBalance = 0;
+      return data;
+    },
+    11(data) {
+      data.settings ||= {};
+      data.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+      data.operations = Array.isArray(data.operations) ? data.operations : [];
+      data.transfers = Array.isArray(data.transfers) ? data.transfers : [];
+      data.recurring = Array.isArray(data.recurring) ? data.recurring : [];
+      data.debts = Array.isArray(data.debts) ? data.debts : [];
+
+      const cards = Array.isArray(data.cards) ? data.cards.map((item, index) => normalizeV11Card(item, index)) : [];
+      const cardsByAccount = cards.reduce((map, card) => {
+        (map[card.accountId] ||= []).push(card);
+        return map;
+      }, {});
+
+      const legacyAccounts = data.accounts.map(item => ({ ...item }));
+      data.accounts = legacyAccounts.map((item, index) => {
+        const accountCards = (cardsByAccount[item?.id] || [])
+          .sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || String(a.createdAt).localeCompare(String(b.createdAt)));
+        const primaryCard = accountCards[0] || null;
+        const account = normalizeV11Account({
+          ...item,
+          ...(primaryCard ? {
+            lastFourDigits: primaryCard.lastFourDigits,
+            paymentSystem: primaryCard.paymentSystem,
+            isVirtual: primaryCard.isVirtual,
+            expirationDate: primaryCard.expirationDate,
+            creditLimit: primaryCard.creditLimit,
+            color: primaryCard.color || item?.color || "",
+            isLegacy: primaryCard.isLegacy,
+            isMigrated: primaryCard.isMigrated,
+            numberMissing: primaryCard.numberMissing
+          } : {})
+        }, index, data.settings);
+        if (primaryCard && ["current", "card", "credit", "debit_card", "credit_card"].includes(item?.type)) {
+          account.type = primaryCard.cardType === "credit" || item?.type === "credit" ? "credit_card" : "debit_card";
+          account.allowNegativeBalance = account.type === "credit_card" || item?.allowNegativeBalance === true;
+          account.creditLimit = account.type === "credit_card" ? Math.max(0, Number(primaryCard.creditLimit || item?.creditLimit || 0)) : 0;
+          account.numberMissing = primaryCard.numberMissing === true || !primaryCard.lastFourDigits;
+        }
+        return account;
+      });
+
+      if (!data.accounts.length) {
+        data.accounts = [normalizeV11Account({ id: "account-main", name: "Основная карта", type: "debit_card" }, 0, data.settings)];
+      }
+
+      const accountIds = new Set(data.accounts.map(account => account.id));
+      const fallbackAccountId = data.accounts[0].id;
+      data.operations = data.operations.map((item, index) => {
+        const operation = normalizeV11Operation(item, fallbackAccountId, index);
+        if (!accountIds.has(operation.accountId)) operation.accountId = fallbackAccountId;
+        operation.cardId = "";
+        operation.account = data.accounts.find(account => account.id === operation.accountId)?.name || "";
+        return operation;
+      });
+      ensureInitialBalances(data, legacyAccounts, data.accounts);
+      data.operations = normalizeInitialBalanceIds(data.operations);
+      data.transfers = data.transfers
+        .map((item, index) => ({
+          id: item.id || `transfer-${index + 1}`,
+          fromAccountId: item.fromAccountId || item.from,
+          toAccountId: item.toAccountId || item.to,
+          amount: Number(item.amount || 0),
+          fee: Math.max(0, Number(item.fee || 0)),
+          date: item.date || isoToday(),
+          note: item.note || item.comment || "",
+          comment: item.comment || item.note || "",
+          createdAt: item.createdAt || item.date || isoToday()
+        }))
+        .filter(item => item.amount > 0
+          && item.fromAccountId !== item.toAccountId
+          && accountIds.has(item.fromAccountId)
+          && accountIds.has(item.toAccountId));
+      data.recurring = data.recurring.map(item => ({
+        ...item,
+        accountId: accountIds.has(item.accountId) ? item.accountId : fallbackAccountId
+      }));
+      data.cards = [];
       data.settings.openingBalance = 0;
       return data;
     }

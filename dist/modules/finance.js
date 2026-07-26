@@ -7,18 +7,27 @@
     return Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
   }
 
-  const ANALYTICS_OPERATION_TYPES = new Set(["income", "expense", "fee"]);
+  const ANALYTICS_OPERATION_TYPES = new Set(["income", "expense", "fee", "refund"]);
 
   function operationBalanceImpact(operation) {
     const amount = Number(operation?.amount || 0);
     if (operation?.type === "income" || operation?.type === "initial_balance") return amount;
     if (operation?.type === "expense" || operation?.type === "fee") return -Math.abs(amount);
+    if (operation?.type === "refund") return Math.abs(amount);
     if (operation?.type === "balance_adjustment") return amount;
     return 0;
   }
 
   function operationAffectsAnalytics(operation) {
     return ANALYTICS_OPERATION_TYPES.has(operation?.type);
+  }
+
+  function operationAnalyticsImpact(operation) {
+    if (!operationAffectsAnalytics(operation)) return { income: 0, expense: 0 };
+    const amount = Math.abs(Number(operation?.amount || 0));
+    if (operation?.type === "income") return { income: amount, expense: 0 };
+    if (operation?.type === "refund") return { income: 0, expense: -amount };
+    return { income: 0, expense: amount };
   }
 
   function transferFee(transfer) {
@@ -48,6 +57,18 @@
       if (!accountIncludedInTotal(account)) return sum;
       return sum + calculateAccountBalance(account, operations, transfers);
     }, 0));
+  }
+
+  function creditDebt(account, operations = [], transfers = []) {
+    return roundMoney(Math.max(0, -calculateAccountBalance(account, operations, transfers)));
+  }
+
+  function creditOverpayment(account, operations = [], transfers = []) {
+    return roundMoney(Math.max(0, calculateAccountBalance(account, operations, transfers)));
+  }
+
+  function availableCredit(account, operations = [], transfers = []) {
+    return roundMoney(Math.max(0, Number(account?.creditLimit || 0) + calculateAccountBalance(account, operations, transfers)));
   }
 
   function calculateTransferFeesTotal(transfers = [], predicate = () => true) {
@@ -151,10 +172,14 @@
     roundMoney,
     operationBalanceImpact,
     operationAffectsAnalytics,
+    operationAnalyticsImpact,
     transferFee,
     calculateAccountBalance,
     calculateAccountsTotal,
     calculateTransferFeesTotal,
+    creditDebt,
+    creditOverpayment,
+    availableCredit,
     recurringMonthlyAmount,
     annuityPayment,
     simulateDebtStrategy

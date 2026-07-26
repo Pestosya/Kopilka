@@ -101,9 +101,10 @@ test("legacy encrypted profile сохраняет password wrap после ми�
   assert.equal(migrated.settings.encryptedAtRest, true);
   assert.equal(migrated.settings.vaultPinWrap, null);
   assert.deepEqual(migrated.settings.vaultPasswordWrap, wrapper);
-  assert.equal(migrated.cards.length, 1);
-  assert.equal(migrated.cards[0].lastFourDigits, "");
-  assert.equal(migrated.cards[0].numberMissing, true);
+  assert.deepEqual(migrated.cards, []);
+  assert.equal(migrated.accounts[0].type, "debit_card");
+  assert.equal(migrated.accounts[0].lastFourDigits, "");
+  assert.equal(migrated.accounts[0].numberMissing, true);
 
   const autosavedEnvelope = await encryptWithRawKey(migrated, key);
   const autosavedRecord = {

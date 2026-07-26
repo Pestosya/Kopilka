@@ -2,8 +2,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   roundMoney,
+  operationBalanceImpact,
+  operationAnalyticsImpact,
   calculateAccountBalance,
   calculateAccountsTotal,
+  creditDebt,
+  creditOverpayment,
+  availableCredit,
   recurringMonthlyAmount,
   annuityPayment,
   simulateDebtStrategy
@@ -58,13 +63,79 @@ test("openingBalance и currentBalance не являются источника�
 test("кредитный лимит не прибавляется к собственным средствам", () => {
   const accounts = [
     { id: "cash", type: "cash", includeInTotal: true },
-    { id: "credit", type: "credit", includeInTotal: true, creditLimit: 100000 }
+    { id: "credit", type: "credit_card", includeInTotal: true, creditLimit: 100000 }
   ];
   const operations = [
     { accountId: "cash", type: "initial_balance", amount: 50000 },
     { accountId: "credit", type: "initial_balance", amount: -35000 }
   ];
   assert.equal(calculateAccountsTotal(accounts, operations, []), 15000);
+});
+
+test("баланс дебетовой карты считается по операциям и переводам", () => {
+  const account = { id: "debit", type: "debit_card", includeInTotal: true };
+  const operations = [
+    { accountId: "debit", type: "initial_balance", amount: 10000 },
+    { accountId: "debit", type: "income", amount: 2500 },
+    { accountId: "debit", type: "expense", amount: 700 },
+    { accountId: "debit", type: "refund", amount: 200 }
+  ];
+  const transfers = [{ fromAccountId: "debit", toAccountId: "cash", amount: 1000, fee: 50 }];
+  assert.equal(calculateAccountBalance(account, operations, transfers), 10950);
+});
+
+test("кредитная карта использует знаковый calculatedBalance для долга и лимита", () => {
+  const account = { id: "credit", type: "credit_card", includeInTotal: true, creditLimit: 100000 };
+  const operations = [
+    { accountId: "credit", type: "initial_balance", amount: -35000 }
+  ];
+  assert.equal(calculateAccountBalance(account, operations, []), -35000);
+  assert.equal(creditDebt(account, operations, []), 35000);
+  assert.equal(creditOverpayment(account, operations, []), 0);
+  assert.equal(availableCredit(account, operations, []), 65000);
+});
+
+test("покупка по кредитке увеличивает долг, а погашение переводом не становится расходом", () => {
+  const accounts = [
+    { id: "cash", type: "cash", includeInTotal: true },
+    { id: "credit", type: "credit_card", includeInTotal: true, creditLimit: 100000 }
+  ];
+  const operations = [
+    { accountId: "cash", type: "initial_balance", amount: 50000 },
+    { accountId: "credit", type: "initial_balance", amount: -35000 },
+    { accountId: "credit", type: "expense", amount: 2000 }
+  ];
+  const transfers = [{ fromAccountId: "cash", toAccountId: "credit", amount: 10000 }];
+  assert.equal(calculateAccountBalance(accounts[0], operations, transfers), 40000);
+  assert.equal(calculateAccountBalance(accounts[1], operations, transfers), -27000);
+  assert.equal(creditDebt(accounts[1], operations, transfers), 27000);
+  assert.equal(availableCredit(accounts[1], operations, transfers), 73000);
+  assert.equal(calculateAccountsTotal(accounts, operations, transfers), 13000);
+});
+
+test("refund уменьшает расходы и не является доходом", () => {
+  const purchase = { accountId: "credit", type: "expense", amount: 5000 };
+  const refund = { accountId: "credit", type: "refund", amount: 1200, relatedOperationId: "purchase-1", category: "Продукты" };
+  assert.equal(operationBalanceImpact(purchase), -5000);
+  assert.equal(operationBalanceImpact(refund), 1200);
+  assert.deepEqual(operationAnalyticsImpact(purchase), { income: 0, expense: 5000 });
+  assert.deepEqual(operationAnalyticsImpact(refund), { income: 0, expense: -1200 });
+});
+
+test("чистый капитал учитывает долг кредитной карты отрицательно", () => {
+  const accounts = [
+    { id: "debit", type: "debit_card", includeInTotal: true },
+    { id: "savings", type: "savings", includeInTotal: true },
+    { id: "hidden", type: "wallet", includeInTotal: false },
+    { id: "credit", type: "credit_card", includeInTotal: true, creditLimit: 300000 }
+  ];
+  const operations = [
+    { accountId: "debit", type: "initial_balance", amount: 40000 },
+    { accountId: "savings", type: "initial_balance", amount: 25000 },
+    { accountId: "hidden", type: "initial_balance", amount: 999999 },
+    { accountId: "credit", type: "initial_balance", amount: -12000 }
+  ];
+  assert.equal(calculateAccountsTotal(accounts, operations, []), 53000);
 });
 
 test("регулярные платежи приводятся к месячной сумме", () => {

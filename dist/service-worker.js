@@ -1,4 +1,4 @@
-const CACHE = "kopilka-b9d0b7dbb095";
+const CACHE = "kopilka-c3da1eea6fbe";
 const ASSETS = [
   "./", "./index.html", "./styles.css?v=40", "./app.js?v=40", "./manifest.webmanifest",
   "./modules/migrations.js", "./modules/finance.js", "./modules/security.js",

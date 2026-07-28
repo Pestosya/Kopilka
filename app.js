@@ -132,6 +132,7 @@ let state = loadState();
 let operationFilter = "all";
 let accountFilter = "all";
 let accountActivityFilter = "all";
+let accountActivityAccountId = "";
 let privacyMode = false;
 let installPrompt = null;
 let toastTimer = null;
@@ -1231,14 +1232,19 @@ function ownAccountsBalance() {
   return totalAccountsBalance();
 }
 
+function ownFundsBalance() {
+  return roundMoney(activeAccounts()
+    .filter(account => account.includeInTotal !== false)
+    .reduce((sum, account) => {
+      const balance = accountBalance(account.id);
+      return sum + (isCreditProduct(account) ? Math.max(0, balance) : balance);
+    }, 0));
+}
+
 function creditAccountsDebt() {
   return roundMoney(activeAccounts()
     .filter(account => isCreditProduct(account))
     .reduce((sum, account) => sum + creditDebt(account, state.operations, state.transfers), 0));
-}
-
-function activeCards() {
-  return activeAccounts().filter(isCardProduct);
 }
 
 function accountStatusLabel(account) {
@@ -1246,6 +1252,15 @@ function accountStatusLabel(account) {
   if (account?.includeInTotal === false) return "Скрыт из общего баланса";
   if (account?.hideBalance) return "Сумма скрыта";
   return "Активен";
+}
+
+function safeTimestamp(value) {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  if (Number.isFinite(parsed)) return parsed;
+  const date = parseDate(value);
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : 0;
 }
 
 function operationTimestamp(item) {
@@ -1646,6 +1661,10 @@ function renderOperations() {
   }).join("");
 }
 
+function operationBlocksAccountDeletion(operation) {
+  return !(operation?.type === "initial_balance" && Number(operation.amount || 0) === 0);
+}
+
 function accountHistory(accountId) {
   const operationIds = state.operations.filter(operation => operation.accountId === accountId);
   const transferIds = state.transfers.filter(transfer =>
@@ -1656,14 +1675,12 @@ function accountHistory(accountId) {
     operations: operationIds,
     transfers: transferIds,
     recurring: recurringIds,
-    hasAny: operationIds.length > 0 || transferIds.length > 0 || recurringIds.length > 0
+    hasAny: operationIds.some(operationBlocksAccountDeletion) || transferIds.length > 0 || recurringIds.length > 0
   };
 }
 
 function visibleAccountsForFilter() {
   const accounts = accountFilter === "archive" ? state.accounts.filter(account => account.isArchived) : activeAccounts();
-  if (accountFilter === "accounts") return accounts.filter(account => account.type === "savings" || account.type === "wallet");
-  if (accountFilter === "cards") return accounts.filter(isCardProduct);
   if (accountFilter === "debit_cards") return accounts.filter(account => account.type === "debit_card");
   if (accountFilter === "credit_cards") return accounts.filter(account => account.type === "credit_card");
   if (accountFilter === "savings") return accounts.filter(account => account.type === "savings");
@@ -1674,21 +1691,40 @@ function visibleAccountsForFilter() {
 
 function accountEmptyMessage() {
   if (accountFilter === "archive") return ["Архив пуст", "Архивированные счета появятся здесь"];
-  if (accountFilter === "cards" || accountFilter === "debit_cards") return ["Нет карт", "Добавьте самостоятельную дебетовую карту"];
+  if (accountFilter === "debit_cards") return ["Нет дебетовых карт", "Добавьте самостоятельную дебетовую карту"];
   if (accountFilter === "credit_cards") return ["Нет кредитных карт", "Добавьте кредитную карту с лимитом"];
   if (accountFilter === "savings") return ["Нет накопительных счетов", "Добавьте счёт для цели или сбережений"];
   if (accountFilter === "cash") return ["Нет наличных", "Добавьте кошелёк для наличных"];
   if (accountFilter === "wallet") return ["Нет кошельков", "Добавьте электронный кошелёк"];
-  if (accountFilter === "accounts") return ["Нет счетов", "Добавьте накопительный счёт или электронный кошелёк"];
   return ["Нет продуктов", "Добавьте первую карту, счёт, наличные или кошелёк"];
 }
 
-function accountActivityItems(mode = accountActivityFilter) {
+function accountActivitySort(a, b) {
+  const dateDiff = Number(b.sortDate || 0) - Number(a.sortDate || 0);
+  if (dateDiff) return dateDiff;
+  const priorityDiff = Number(b.sortPriority || 0) - Number(a.sortPriority || 0);
+  if (priorityDiff) return priorityDiff;
+  const createdDiff = Number(b.sortCreatedAt || 0) - Number(a.sortCreatedAt || 0);
+  if (createdDiff) return createdDiff;
+  return String(b.id || "").localeCompare(String(a.id || ""));
+}
+
+function accountActivityItemBelongsTo(item, accountId) {
+  if (!accountId) return true;
+  if (item.source === "operation") return item.accountId === accountId;
+  return item.fromAccountId === accountId || item.toAccountId === accountId;
+}
+
+function accountActivityItems(mode = accountActivityFilter, accountId = accountActivityAccountId) {
   const operations = state.operations.map(operation => {
     const amount = Number(operation.amount || 0);
     const isNeutral = operation.type === "initial_balance" || operation.type === "balance_adjustment";
     const account = accountById(operation.accountId);
-    const amountClass = operationAmountClass(operation.type, amount) || "neutral";
+    const amountClass = isNeutral
+      ? "neutral"
+      : operation.type === "refund"
+        ? "refund"
+        : (operationAmountClass(operation.type, amount) || "neutral");
     const prefix = isNeutral
       ? (operation.type === "balance_adjustment" && amount < 0 ? "− " : "")
       : `${operationAmountPrefix(operation.type, amount)} `;
@@ -1697,6 +1733,9 @@ function accountActivityItems(mode = accountActivityFilter) {
       source: "operation",
       date: operation.date || operation.createdAt || "",
       sortKey: operationTimestamp(operation),
+      sortDate: safeTimestamp(operation.date || operation.createdAt),
+      sortCreatedAt: safeTimestamp(operation.createdAt || operation.date),
+      sortPriority: operation.type === "initial_balance" ? 0 : 1,
       icon: visualFor(operation.category, operation.type),
       title: operation.note || operation.category || operationTypeLabel(operation.type),
       category: operation.category || operationTypeLabel(operation.type),
@@ -1706,107 +1745,189 @@ function accountActivityItems(mode = accountActivityFilter) {
       amount: `${prefix}${money(Math.abs(amount))}`,
       amountClass,
       canDelete: operation.type === "income" || operation.type === "expense" || operation.type === "refund",
+      accountId: operation.accountId,
       rawId: operation.id
     };
   });
 
-  const transfers = state.transfers.map(transfer => ({
-    id: transfer.id,
-    source: "transfer",
-    date: transfer.date || "",
-    sortKey: operationTimestamp(transfer),
-    icon: ["⇄", "sky"],
-    title: transfer.note || "Перевод между счетами",
-    category: transferFee(transfer) ? `Перевод · комиссия ${money(transferFee(transfer))}` : "Перевод",
-    account: `${accountName(transfer.fromAccountId)} → ${accountName(transfer.toAccountId)}`,
-    card: "",
-    typeLabel: "Перевод",
-    amount: money(transfer.amount),
-    amountClass: "neutral",
-    canDelete: true,
-    rawId: transfer.id
-  }));
+  const transfers = state.transfers.map(transfer => {
+    const viewedAccount = accountId ? accountById(accountId) : null;
+    const isLocal = accountId && (transfer.fromAccountId === accountId || transfer.toAccountId === accountId);
+    const isOutgoing = isLocal && transfer.fromAccountId === accountId;
+    const isIncoming = isLocal && transfer.toAccountId === accountId;
+    const localTitle = isIncoming && isCreditProduct(viewedAccount)
+      ? "Погашение кредитной карты"
+      : isOutgoing
+        ? `Перевод на ${accountName(transfer.toAccountId)}`
+        : isIncoming
+          ? `Перевод с ${accountName(transfer.fromAccountId)}`
+          : transfer.note || "Перевод между счетами";
+    const fee = transferFee(transfer);
+    return {
+      id: transfer.id,
+      source: "transfer",
+      date: transfer.date || "",
+      sortKey: operationTimestamp(transfer),
+      sortDate: safeTimestamp(transfer.date || transfer.createdAt),
+      sortCreatedAt: safeTimestamp(transfer.createdAt || transfer.date),
+      sortPriority: 1,
+      icon: ["⇄", "sky"],
+      title: isLocal ? localTitle : (transfer.note || localTitle),
+      category: [
+        "Перевод",
+        isLocal && transfer.note ? transfer.note : "",
+        fee ? `комиссия ${money(fee)}` : ""
+      ].filter(Boolean).join(" · "),
+      account: `${accountName(transfer.fromAccountId)} → ${accountName(transfer.toAccountId)}`,
+      card: "",
+      typeLabel: "Перевод",
+      amount: isLocal ? `${isOutgoing ? "−" : "+"} ${money(transfer.amount)}` : money(transfer.amount),
+      amountClass: "neutral",
+      canDelete: true,
+      fromAccountId: transfer.fromAccountId,
+      toAccountId: transfer.toAccountId,
+      rawId: transfer.id
+    };
+  });
 
   const items = mode === "transfers" ? transfers : [...operations, ...transfers];
-  return items.sort((a, b) => String(b.sortKey).localeCompare(String(a.sortKey)));
+  return items
+    .filter(item => accountActivityItemBelongsTo(item, accountId))
+    .sort(accountActivitySort);
 }
 
 function latestAccountActivity(accountId) {
-  return accountActivityItems("all")
-    .filter(item => {
-      if (item.source === "operation") {
-        const operation = state.operations.find(entry => entry.id === item.rawId);
-        return operation?.accountId === accountId;
-      }
-      const transfer = state.transfers.find(entry => entry.id === item.rawId);
-      return transfer?.fromAccountId === accountId || transfer?.toAccountId === accountId;
-    })[0];
+  return accountActivityItems("all", accountId)[0];
 }
 
 function accountLocalActivityItems(accountId) {
-  const operationItems = state.operations
-    .filter(operation => operation.accountId === accountId)
-    .map(operation => {
-      const amount = Number(operation.amount || 0);
-      return {
-        id: operation.id,
-        sortKey: operationTimestamp(operation),
-        title: operation.note || operation.category || operationTypeLabel(operation.type),
-        meta: `${formatDate(operation.date, true)} · ${operation.category || operationTypeLabel(operation.type)}`,
-        amount: `${operationAmountPrefix(operation.type, amount)} ${money(Math.abs(amount))}`,
-        amountClass: operationAmountClass(operation.type, amount) || "neutral"
-      };
-    });
-  const transferItems = state.transfers
-    .filter(transfer => transfer.fromAccountId === accountId || transfer.toAccountId === accountId)
-    .map(transfer => {
-      const isOutgoing = transfer.fromAccountId === accountId;
-      const fee = isOutgoing ? transferFee(transfer) : 0;
-      const total = Number(transfer.amount || 0) + fee;
-      return {
-        id: transfer.id,
-        sortKey: operationTimestamp(transfer),
-        title: transfer.note || (isOutgoing ? `Перевод на ${accountName(transfer.toAccountId)}` : `Перевод с ${accountName(transfer.fromAccountId)}`),
-        meta: fee ? `${formatDate(transfer.date, true)} · перевод · комиссия ${money(fee)}` : `${formatDate(transfer.date, true)} · перевод`,
-        amount: `${isOutgoing ? "−" : "+"} ${money(total)}`,
-        amountClass: "neutral"
-      };
-    });
-  return [...operationItems, ...transferItems].sort((a, b) => String(b.sortKey).localeCompare(String(a.sortKey)));
+  return accountActivityItems("all", accountId).map(item => ({
+    id: item.id,
+    source: item.source,
+    sortKey: item.sortKey,
+    title: item.title,
+    meta: `${formatDate(item.date, true)} · ${item.category}`,
+    amount: item.amount,
+    amountClass: item.amountClass
+  }));
+}
+
+function accountMonthTotals(accountId) {
+  const key = monthKey();
+  const totals = state.operations
+    .filter(operation => operationAffectsAnalytics(operation)
+      && operation.accountId === accountId
+      && String(operation.date).slice(0, 7) === key)
+    .reduce((result, operation) => {
+      const impact = operationAnalyticsImpact(operation);
+      result.income += impact.income;
+      result.expense += impact.expense;
+      return result;
+    }, { income: 0, expense: 0 });
+  totals.expense += calculateTransferFeesTotal(state.transfers, transfer =>
+    transfer.fromAccountId === accountId && String(transfer.date).slice(0, 7) === key
+  );
+  return {
+    income: roundMoney(totals.income),
+    expense: roundMoney(totals.expense)
+  };
+}
+
+function metric(label, value, sensitive = false) {
+  if (value === "" || value === null || value === undefined) return null;
+  return { label, value: String(value), sensitive };
 }
 
 function accountProductMetrics(account, balance, history) {
   const updated = formatDate(accountUpdatedDate(account), true);
+  const month = accountMonthTotals(account.id);
+  const historyCount = history.operations.length + history.transfers.length;
   if (isCreditProduct(account)) {
     const debt = creditDebt(account, state.operations, state.transfers);
     const overpayment = creditOverpayment(account, state.operations, state.transfers);
     return [
-      ["Кредитный лимит", accountMoney(account, Number(account.creditLimit || 0))],
-      ["Доступно", accountMoney(account, availableCredit(account, state.operations, state.transfers))],
-      ["Переплата", accountMoney(account, overpayment)],
-      ["Минимальный платёж", account.minimumPayment ? accountMoney(account, account.minimumPayment) : "Не задан"],
-      ["Дата платежа", account.paymentDueDate || "Не задана"],
-      ["Текущий долг", accountMoney(account, debt)]
-    ];
+      metric("Задолженность", accountMoney(account, debt), true),
+      Number(account.creditLimit || 0) > 0 ? metric("Кредитный лимит", accountMoney(account, account.creditLimit), true) : null,
+      Number(account.creditLimit || 0) > 0 ? metric("Доступно", accountMoney(account, availableCredit(account, state.operations, state.transfers)), true) : null,
+      overpayment > 0 ? metric("Переплата", accountMoney(account, overpayment), true) : null,
+      Number(account.minimumPayment || 0) > 0 ? metric("Минимальный платёж", accountMoney(account, account.minimumPayment), true) : null,
+      account.paymentDueDate ? metric("Дата платежа", formatDate(account.paymentDueDate, true)) : null,
+      Number(account.interestRate || 0) > 0 ? metric("Ставка", `${Number(account.interestRate)}%`) : null,
+      Number(account.gracePaymentAmount || 0) > 0 ? metric("Для льготного периода", accountMoney(account, account.gracePaymentAmount), true) : null,
+      metric("Расходы за месяц", accountMoney(account, month.expense), true)
+    ].filter(Boolean);
   }
   if (account.type === "debit_card") {
     return [
-      ["Номер", cardNumberLabel(account)],
-      ["Платёжная система", cardPaymentSystemName(account.paymentSystem)],
-      ["Формат", cardFormatName(account)],
-      ["Операций", String(history.operations.length)],
-      ["Обновлено", updated],
-      ["Валюта", account.currency || state.settings.currency]
+      metric("Поступления за месяц", accountMoney(account, month.income), true),
+      metric("Расходы за месяц", accountMoney(account, month.expense), true),
+      metric("Операций", String(historyCount)),
+      metric("Обновлено", updated)
+    ].filter(Boolean);
+  }
+  if (account.type === "savings") {
+    return [
+      Number(account.interestRate || 0) > 0 ? metric("Ставка", `${Number(account.interestRate)}% годовых`) : null,
+      account.goalName ? metric("Цель", account.goalName) : null,
+      Number(account.goalAmount || 0) > 0 ? metric("Сумма цели", accountMoney(account, account.goalAmount), true) : null,
+      account.nextInterestDate ? metric("Начисление", formatDate(account.nextInterestDate, true)) : null,
+      Number(account.monthlyInterestIncome || 0) > 0 ? metric("Доход за месяц", accountMoney(account, account.monthlyInterestIncome), true) : null,
+      metric("Операций", String(historyCount))
+    ].filter(Boolean);
+  }
+  return [
+    metric("Поступления за месяц", accountMoney(account, month.income), true),
+    metric("Расходы за месяц", accountMoney(account, month.expense), true),
+    metric("Операций", String(historyCount)),
+    metric("Валюта", account.currency || state.settings.currency)
+  ].filter(Boolean);
+}
+
+function productQuickActions(account) {
+  if (account.type === "credit_card") {
+    return [
+      { action: "pay-credit", label: "Внести платёж", icon: "+" },
+      { action: "purchase", label: "Добавить покупку", icon: "−" },
+      { action: "transfer", label: "Перевести", icon: "⇄" },
+      { action: "history", label: "История", icon: "≡" }
+    ];
+  }
+  if (account.type === "cash") {
+    return [
+      { action: "income", label: "Добавить доход", icon: "+" },
+      { action: "expense", label: "Добавить расход", icon: "−" },
+      { action: "transfer", label: "Перевести", icon: "⇄" },
+      { action: "history", label: "История", icon: "≡" }
     ];
   }
   return [
-    ["Баланс", accountMoney(account, balance)],
-    ["Операций", String(history.operations.length)],
-    ["Переводов", String(history.transfers.length)],
-    ["Обновлено", updated],
-    ["Валюта", account.currency || state.settings.currency],
-    ["Финподушка", account.includeInSafetyFund ? "Учитывается" : "Не учитывается"]
+    { action: "topup", label: "Пополнить", icon: "+" },
+    { action: "transfer", label: "Перевести", icon: "⇄" },
+    { action: "operation", label: "Добавить операцию", icon: "↕" },
+    { action: "history", label: "История", icon: "≡" }
   ];
+}
+
+function creditPaymentNotice(account) {
+  if (!isCreditProduct(account) || !account.paymentDueDate || Number(account.minimumPayment || 0) <= 0) return "";
+  if (creditDebt(account, state.operations, state.transfers) <= 0) return "";
+  const days = daysUntil(account.paymentDueDate);
+  let tone = "soon";
+  let title = `Минимальный платёж ${accountMoney(account, account.minimumPayment)}`;
+  let text = `до ${formatDate(account.paymentDueDate, true)}`;
+  if (days < 0) {
+    tone = "overdue";
+    text = `просрочен на ${Math.abs(days)} ${plural(Math.abs(days), ["день", "дня", "дней"])}`;
+  } else if (days === 0) {
+    tone = "today";
+    text = "срок сегодня";
+  } else if (days > 7) {
+    return "";
+  }
+  return `<div class="product-credit-notice ${tone}">
+    <span aria-hidden="true">${tone === "overdue" ? "!" : "i"}</span>
+    <div><b class="sensitive">${escapeHtml(title)}</b><small>${escapeHtml(text)}</small></div>
+  </div>`;
 }
 
 function renderAccountCards(accounts) {
@@ -1820,45 +1941,56 @@ function renderAccountCards(accounts) {
   target.innerHTML = accounts.map(account => {
     const balance = accountBalance(account.id);
     const isCredit = isCreditProduct(account);
+    const isSavings = account.type === "savings";
     const mainAmount = isCredit ? creditDebt(account, state.operations, state.transfers) : balance;
-    const amountLabel = isCredit ? "Задолженность" : "Баланс";
-    const lastActivity = latestAccountActivity(account.id);
+    const amountLabel = isCredit ? "Задолженность" : isSavings ? "Накоплено" : account.type === "cash" ? "Текущая сумма" : "Баланс";
     const history = accountHistory(account.id);
     const localActivity = accountLocalActivityItems(account.id).slice(0, 3);
-    const updatedAt = accountUpdatedDate(account);
     const colorClass = accountColorClass(account.color) || accountVisualClass(account.type);
-    const cardMeta = isCardProduct(account)
-      ? ` · ${escapeHtml(cardPaymentSystemName(account.paymentSystem))} · ${escapeHtml(cardNumberLabel(account))} · ${escapeHtml(cardFormatName(account))}`
-      : "";
+    const productMeta = [
+      accountTypeName(account.type),
+      isCardProduct(account) ? cardPaymentSystemName(account.paymentSystem) : "",
+      isCardProduct(account) ? cardNumberLabel(account) : "",
+      isCardProduct(account) ? cardFormatName(account) : "",
+      account.currency || state.settings.currency
+    ].filter(Boolean).join(" · ");
     const productMetrics = accountProductMetrics(account, balance, history)
-      .map(([label, value]) => `<span>${escapeHtml(label)}<b>${escapeHtml(value)}</b></span>`)
+      .map(item => `<span>${escapeHtml(item.label)}<b class="${item.sensitive ? "sensitive" : ""}">${escapeHtml(item.value)}</b></span>`)
       .join("");
+    const goalAmount = Number(account.goalAmount || 0);
+    const goalPercent = goalAmount > 0 ? Math.max(0, Math.min(100, Math.round(Math.max(0, balance) / goalAmount * 100))) : 0;
+    const goalMarkup = account.type === "savings" && goalAmount > 0
+      ? `<div class="product-goal">
+          <div><b>${escapeHtml(account.goalName || "Цель")}</b><span class="sensitive">${accountMoney(account, Math.max(0, balance))} из ${accountMoney(account, goalAmount)}</span></div>
+          <div class="product-goal-bar" aria-label="Прогресс цели ${goalPercent}%"><i style="width:${goalPercent}%"></i></div>
+          <small>${goalPercent >= 100 ? "Цель достигнута" : `${goalPercent}% выполнено`}</small>
+        </div>`
+      : "";
+    const creditNotice = isCredit ? creditPaymentNotice(account) : "";
     const localActivityMarkup = localActivity.length
-      ? localActivity.map(item => `<div class="account-local-operation">
+      ? localActivity.map(item => `<button class="product-operation-row" type="button" data-account-action="history" data-account-id="${escapeHtml(account.id)}">
           <span><b>${escapeHtml(item.title)}</b><small>${escapeHtml(item.meta)}</small></span>
           <strong class="${escapeHtml(item.amountClass)} sensitive">${escapeHtml(item.amount)}</strong>
-        </div>`).join("")
-      : `<div class="account-no-cards">Операций по продукту пока нет</div>`;
-    return `<article class="account-row ${colorClass} ${account.isArchived ? "archived" : ""}">
-      <div class="account-row-main">
-        <span class="account-row-icon">${escapeHtml(accountDisplayIcon(account))}</span>
-        <div class="account-row-title">
-          <div class="account-row-name">
+        </button>`).join("")
+      : `<div class="product-empty-operations">Операций пока нет</div>`;
+    const quickActions = productQuickActions(account)
+      .map(action => `<button type="button" data-account-action="${escapeHtml(action.action)}" data-account-id="${escapeHtml(account.id)}" aria-label="${escapeHtml(action.label)}: ${escapeHtml(account.name)}"><span aria-hidden="true">${escapeHtml(action.icon)}</span>${escapeHtml(action.label)}</button>`)
+      .join("");
+    return `<article class="account-product-card ${colorClass} ${account.isArchived ? "archived" : ""}">
+      <div class="product-card-top">
+        <button class="product-main-info" type="button" data-account-open="${escapeHtml(account.id)}" aria-label="Открыть ${escapeHtml(account.name)}">
+          <span class="account-row-icon" aria-hidden="true">${escapeHtml(accountDisplayIcon(account))}</span>
+          <span class="product-heading">
+            <small>${escapeHtml(account.bankName || (account.type === "cash" ? "Наличные" : account.type === "wallet" ? "Сервис" : "Без банка"))}</small>
             <b>${escapeHtml(account.name)}</b>
-            <span>${escapeHtml(accountStatusLabel(account))}</span>
-          </div>
-          <small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))}${cardMeta}</small>
-        </div>
-        <div class="account-row-balance">
-          <b class="sensitive ${account.hideBalance ? "account-private-amount" : ""}">${accountMoney(account, mainAmount)}</b>
-          <small>${escapeHtml(amountLabel)} · обновлён ${formatDate(updatedAt, true)}</small>
-        </div>
+            <em>${escapeHtml(productMeta)}</em>
+          </span>
+        </button>
+        <span class="product-status">${escapeHtml(accountStatusLabel(account))}</span>
         <div class="account-menu-wrap">
-          <button class="account-menu-button" type="button" data-account-menu="${escapeHtml(account.id)}" aria-label="Меню счёта">•••</button>
+          <button class="account-menu-button" type="button" data-account-menu="${escapeHtml(account.id)}" aria-label="Открыть меню ${escapeHtml(account.name)}" aria-expanded="false">•••</button>
           <div class="account-action-menu" data-account-menu-panel="${escapeHtml(account.id)}" hidden>
             <button type="button" data-account-action="open" data-account-id="${escapeHtml(account.id)}">Открыть</button>
-            <button type="button" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">Добавить операцию</button>
-            <button type="button" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">Перевести</button>
             <button type="button" data-account-action="edit" data-account-id="${escapeHtml(account.id)}">Изменить</button>
             <button type="button" data-account-action="reconcile" data-account-id="${escapeHtml(account.id)}">Сверить баланс</button>
             <button type="button" data-account-action="toggle-total" data-account-id="${escapeHtml(account.id)}">${account.includeInTotal === false ? "Показывать в общем балансе" : "Скрыть из общего баланса"}</button>
@@ -1867,29 +1999,18 @@ function renderAccountCards(accounts) {
           </div>
         </div>
       </div>
-      <div class="account-row-quick-actions">
-        <button type="button" data-account-action="operation" data-account-id="${escapeHtml(account.id)}">${isCredit ? "Покупка" : "Операция"}</button>
-        <button type="button" data-account-action="transfer" data-account-id="${escapeHtml(account.id)}">${isCredit ? "Внести платёж" : "Перевести"}</button>
-        <button type="button" data-account-action="open" data-account-id="${escapeHtml(account.id)}">История</button>
+      <div class="product-amount-block">
+        <span>${escapeHtml(amountLabel)}</span>
+        <b class="sensitive ${account.hideBalance ? "account-private-amount" : ""}">${accountMoney(account, mainAmount)}</b>
+        ${isCredit && mainAmount <= 0 ? "<small>Задолженности нет</small>" : ""}
       </div>
-      <div class="account-row-details">
-        <div class="account-cards-block account-product-block">
-          <span>Показатели продукта</span>
-          <div class="account-product-grid">${productMetrics}</div>
-        </div>
-        <div class="account-last-operation account-local-operations">
-          <span>Последние операции</span>
-          ${localActivityMarkup}
-        </div>
-        <div class="account-last-operation">
-          <span>Свежая запись</span>
-          ${lastActivity ? `<b>${escapeHtml(lastActivity.title)}</b><small>${escapeHtml(lastActivity.typeLabel)} · ${formatDate(lastActivity.date, true)} · ${escapeHtml(lastActivity.category)}</small>` : "<b>Операций нет</b><small>История появится после первой записи</small>"}
-        </div>
-        <div class="account-row-meta">
-          <span>${history.operations.length} ${plural(history.operations.length, ["операция", "операции", "операций"])}</span>
-          <span>${history.transfers.length} ${plural(history.transfers.length, ["перевод", "перевода", "переводов"])}</span>
-          <span>${account.includeInSafetyFund ? "В подушке" : "Не в подушке"}</span>
-        </div>
+      ${creditNotice}
+      ${goalMarkup}
+      <div class="product-quick-actions">${quickActions}</div>
+      ${productMetrics ? `<div class="product-metrics">${productMetrics}</div>` : ""}
+      <div class="product-operations">
+        <div class="product-section-title"><b>Последние операции</b><button type="button" data-account-action="history" data-account-id="${escapeHtml(account.id)}">Все операции</button></div>
+        ${localActivityMarkup}
       </div>
     </article>`;
   }).join("");
@@ -1897,18 +2018,27 @@ function renderAccountCards(accounts) {
 
 function renderAccountActivity() {
   const items = accountActivityItems();
+  const scopedAccount = accountActivityAccountId ? accountById(accountActivityAccountId) : null;
   document.querySelector("#transferCount").textContent =
-    `${items.length} ${plural(items.length, ["операция", "операции", "операций"])}`;
+    scopedAccount
+      ? `Фильтр: ${scopedAccount.name}`
+      : `${items.length} ${plural(items.length, ["операция", "операции", "операций"])}`;
   const target = document.querySelector("#transferList");
+  const scopeMarkup = scopedAccount
+    ? `<div class="account-history-scope">
+        <span>История продукта: <b>${escapeHtml(scopedAccount.name)}</b></span>
+        <button type="button" data-account-history-clear>Показать все</button>
+      </div>`
+    : "";
   if (!items.length) {
     const text = accountActivityFilter === "transfers"
       ? "Переводы между счетами появятся здесь"
       : "Доходы, расходы, переводы и корректировки появятся здесь";
     const title = accountActivityFilter === "transfers" ? "Нет переводов" : "Нет операций";
-    target.innerHTML = `<div class="empty-state"><span>⇄</span><b>${title}</b><small>${text}</small></div>`;
+    target.innerHTML = `${scopeMarkup}<div class="empty-state"><span>⇄</span><b>${title}</b><small>${text}</small></div>`;
     return;
   }
-  target.innerHTML = items.slice(0, 10).map(item => {
+  target.innerHTML = scopeMarkup + items.slice(0, 10).map(item => {
     const [icon, color] = item.icon;
     const deleteButton = item.source === "transfer"
       ? `<button class="row-menu" data-delete-transfer="${escapeHtml(item.rawId)}" aria-label="Удалить перевод">×</button>`
@@ -1928,12 +2058,11 @@ function renderAccountActivity() {
 function renderAccounts() {
   const accounts = visibleAccountsForFilter();
   const accountCount = activeAccounts().length;
-  const cardCount = activeCards().length;
   document.querySelector("#accountsTotal").textContent = money(ownAccountsBalance());
   document.querySelector("#accountsCount").textContent =
-    `${accountCount} ${plural(accountCount, ["объект", "объекта", "объектов"])} · ${cardCount} ${plural(cardCount, ["карта", "карты", "карт"])}`;
+    `${accountCount} ${plural(accountCount, ["активный объект", "активных объекта", "активных объектов"])}`;
   document.querySelector("#accountsActiveCount").textContent = accountCount;
-  document.querySelector("#accountsCardCount").textContent = cardCount;
+  document.querySelector("#accountsOwnFunds").textContent = money(ownFundsBalance());
   document.querySelector("#accountsDebtTotal").textContent = money(creditAccountsDebt());
   document.querySelector("#accountsPrivacyToggle").textContent = privacyMode ? "◌ Показать суммы" : "◉ Скрыть суммы";
   document.querySelectorAll("#accountsFilter button").forEach(button => {
@@ -2860,7 +2989,7 @@ function fillAccountSelects() {
 }
 
 function hideModalForms() {
-  ["operationForm", "debtForm", "paymentForm", "accountForm", "cardForm", "accountDetailsPanel", "transferForm", "recurringForm", "backupForm"].forEach(id => {
+  ["operationForm", "debtForm", "paymentForm", "accountForm", "cardForm", "accountDetailsPanel", "reconcileForm", "transferForm", "recurringForm", "backupForm"].forEach(id => {
     document.querySelector(`#${id}`).hidden = true;
   });
 }
@@ -2909,15 +3038,18 @@ function openRecurringModal(item = null) {
 function openOperationModal(type, operation = null, preferredAccountId = "") {
   const isIncome = type === "income";
   const isRefund = type === "refund";
-  document.querySelector("#modalKicker").textContent = isRefund ? "ВОЗВРАТ" : (isIncome ? "НОВЫЙ ДОХОД" : "НОВЫЙ РАСХОД");
-  document.querySelector("#modalTitle").textContent = operation ? "Изменить операцию" : (type === "refund" ? "Добавить возврат" : (isIncome ? "Добавить доход" : "Добавить расход"));
+  const isFee = type === "fee";
+  document.querySelector("#modalKicker").textContent = isRefund ? "ВОЗВРАТ" : isFee ? "КОМИССИЯ" : (isIncome ? "НОВЫЙ ДОХОД" : "НОВЫЙ РАСХОД");
+  document.querySelector("#modalTitle").textContent = operation
+    ? "Изменить операцию"
+    : (isRefund ? "Добавить возврат" : isFee ? "Добавить комиссию" : (isIncome ? "Добавить доход" : "Добавить расход"));
   hideModalForms();
   document.querySelector("#operationForm").hidden = false;
   document.querySelector("#operationId").value = operation?.id || "";
   document.querySelector("#operationType").value = type;
   document.querySelector("#operationAmount").value = operation?.amount || "";
-  document.querySelector("#amountSign").textContent = isIncome || type === "refund" ? "+" : "−";
-  document.querySelector("#amountSign").style.color = isIncome || type === "refund" ? "var(--mint)" : "var(--coral)";
+  document.querySelector("#amountSign").textContent = isIncome || isRefund ? "+" : "−";
+  document.querySelector("#amountSign").style.color = isIncome || isRefund ? "var(--mint)" : "var(--coral)";
   document.querySelector("#operationDate").value = operation?.date || isoToday();
   fillAccountSelect(document.querySelector("#operationAccount"), operation?.accountId || preferredAccountId);
   document.querySelector("#operationNote").value = operation?.note || "";
@@ -2948,6 +3080,11 @@ function openAccountModal(account = null, defaults = {}) {
   document.querySelector("#accountOpeningBalance").value = Number(account ? initialBalanceAmount(account.id) : 0);
   document.querySelector("#accountColor").value = accountColorClass(draft?.color) || "";
   document.querySelector("#accountIconValue").value = draft?.icon || "";
+  if (document.querySelector("#accountGoalName")) document.querySelector("#accountGoalName").value = draft?.goalName || "";
+  if (document.querySelector("#accountGoalAmount")) document.querySelector("#accountGoalAmount").value = Number(draft?.goalAmount || 0);
+  if (document.querySelector("#accountInterestRate")) document.querySelector("#accountInterestRate").value = Number(draft?.interestRate || 0);
+  if (document.querySelector("#accountNextInterestDate")) document.querySelector("#accountNextInterestDate").value = draft?.nextInterestDate || "";
+  if (document.querySelector("#accountMonthlyInterestIncome")) document.querySelector("#accountMonthlyInterestIncome").value = Number(draft?.monthlyInterestIncome || 0);
   document.querySelector("#accountIncludeInTotal").checked = draft?.includeInTotal !== false;
   document.querySelector("#accountIncludeInSafetyFund").checked = draft?.includeInSafetyFund === true;
   document.querySelector("#accountAllowNegative").checked = draft?.allowNegativeBalance === true || draft?.type === "credit_card";
@@ -2978,6 +3115,10 @@ function openCardModal(product = null, defaults = {}) {
   document.querySelector("#cardVirtual").value = draft?.isVirtual ? "virtual" : "physical";
   document.querySelector("#cardExpiration").value = draft?.expirationDate || "";
   document.querySelector("#cardCreditLimit").value = Number(draft?.creditLimit || 0);
+  if (document.querySelector("#cardMinimumPayment")) document.querySelector("#cardMinimumPayment").value = Number(draft?.minimumPayment || 0);
+  if (document.querySelector("#cardPaymentDueDate")) document.querySelector("#cardPaymentDueDate").value = draft?.paymentDueDate || "";
+  if (document.querySelector("#cardInterestRate")) document.querySelector("#cardInterestRate").value = Number(draft?.interestRate || 0);
+  if (document.querySelector("#cardGracePaymentAmount")) document.querySelector("#cardGracePaymentAmount").value = Number(draft?.gracePaymentAmount || 0);
   if (document.querySelector("#cardIncludeInTotal")) document.querySelector("#cardIncludeInTotal").checked = draft?.includeInTotal !== false;
   if (document.querySelector("#cardHideBalance")) document.querySelector("#cardHideBalance").checked = draft?.hideBalance === true;
   document.querySelector("#cardColor").value = accountColorClass(draft?.color) || "";
@@ -2991,8 +3132,9 @@ function openAccountDetailsModal(account) {
   hideModalForms();
   const balance = accountBalance(account.id);
   const history = accountHistory(account.id);
+  const mainAmount = isCreditProduct(account) ? creditDebt(account, state.operations, state.transfers) : balance;
   const metrics = accountProductMetrics(account, balance, history)
-    .map(([label, value]) => `<span>${escapeHtml(label)}<b>${escapeHtml(value)}</b></span>`)
+    .map(item => `<span>${escapeHtml(item.label)}<b class="${item.sensitive ? "sensitive" : ""}">${escapeHtml(item.value)}</b></span>`)
     .join("");
   document.querySelector("#modalKicker").textContent = "СЧЁТ";
   document.querySelector("#modalTitle").textContent = account.name;
@@ -3000,7 +3142,7 @@ function openAccountDetailsModal(account) {
   panel.hidden = false;
   panel.innerHTML = `<div class="account-details-summary">
     <span class="account-row-icon ${accountColorClass(account.color) || accountVisualClass(account.type)}">${escapeHtml(accountDisplayIcon(account))}</span>
-    <div><b class="sensitive">${accountMoney(account, balance)}</b><small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))} · ${escapeHtml(accountStatusLabel(account))}</small></div>
+    <div><b class="sensitive">${accountMoney(account, mainAmount)}</b><small>${escapeHtml(account.bankName || "Без банка")} · ${escapeHtml(accountTypeName(account.type))} · ${escapeHtml(accountStatusLabel(account))}</small></div>
   </div>
   <div class="account-details-grid">
     ${metrics}
@@ -3399,7 +3541,17 @@ function closeAccountsAddMenu() {
 function closeAccountMenus(exceptId = "") {
   document.querySelectorAll("[data-account-menu-panel]").forEach(panel => {
     panel.hidden = panel.dataset.accountMenuPanel !== exceptId;
+    if (panel.hidden) panel.classList.remove("drop-up");
   });
+  document.querySelectorAll("[data-account-menu]").forEach(button => {
+    button.setAttribute("aria-expanded", String(Boolean(exceptId) && button.dataset.accountMenu === exceptId));
+  });
+}
+
+function positionAccountActionMenu(panel) {
+  panel.classList.remove("drop-up");
+  const rect = panel.getBoundingClientRect();
+  if (rect.bottom > window.innerHeight - 12) panel.classList.add("drop-up");
 }
 
 function toggleAccountActionMenu(accountId) {
@@ -3409,6 +3561,10 @@ function toggleAccountActionMenu(accountId) {
   const shouldOpen = panel.hidden;
   closeAccountMenus(shouldOpen ? accountId : "");
   panel.hidden = !shouldOpen;
+  if (shouldOpen) positionAccountActionMenu(panel);
+  document.querySelectorAll("[data-account-menu]").forEach(button => {
+    if (button.dataset.accountMenu === accountId) button.setAttribute("aria-expanded", String(shouldOpen));
+  });
 }
 
 function createAccountDefaults(type) {
@@ -3479,6 +3635,7 @@ function deleteAccountSafely(accountId) {
   }
   if (!confirm("Удалить этот счёт?")) return;
   state.accounts = state.accounts.filter(item => item.id !== accountId);
+  state.operations = state.operations.filter(operation => operation.accountId !== accountId || operationBlocksAccountDeletion(operation));
   saveState();
   renderAll();
   showToast("Счёт удалён");
@@ -3488,10 +3645,29 @@ function reconcileAccount(accountId) {
   const account = accountById(accountId);
   if (!account) return;
   const current = accountBalance(accountId);
-  const value = prompt(`Текущий баланс счёта «${account.name}»: ${accountMoney(account, current)}. Введите фактический баланс:`, String(current));
-  if (value === null) return;
-  const actual = Number(String(value).replace(",", "."));
-  if (!Number.isFinite(actual)) {
+  const isCredit = isCreditProduct(account);
+  const promptValue = isCredit ? creditDebt(account, state.operations, state.transfers) : current;
+  hideModalForms();
+  document.querySelector("#modalKicker").textContent = "СВЕРКА";
+  document.querySelector("#modalTitle").textContent = `Сверить ${account.name}`;
+  document.querySelector("#reconcileForm").hidden = false;
+  document.querySelector("#reconcileAccountId").value = accountId;
+  document.querySelector("#reconcileHint").innerHTML = isCredit
+    ? `Текущая задолженность: <b class="sensitive">${accountMoney(account, promptValue)}</b>. Введите фактическую задолженность по карте.`
+    : `Текущий баланс: <b class="sensitive">${accountMoney(account, current)}</b>. Введите фактический баланс продукта.`;
+  document.querySelector("#reconcileAmountLabel").childNodes[0].nodeValue =
+    isCredit ? "Фактическая задолженность" : "Фактический баланс";
+  document.querySelector("#reconcileActualBalance").value = String(promptValue);
+  openModal();
+  setTimeout(() => document.querySelector("#reconcileActualBalance").focus(), 100);
+}
+
+function saveReconcileAccount(accountId, entered) {
+  const account = accountById(accountId);
+  if (!account) return;
+  const current = accountBalance(accountId);
+  const actual = isCreditProduct(account) ? -Math.abs(entered) : entered;
+  if (!Number.isFinite(entered)) {
     showToast("Введите корректную сумму");
     return;
   }
@@ -3515,8 +3691,23 @@ function reconcileAccount(accountId) {
   });
   touchAccount(accountId);
   saveState();
+  closeModal();
   renderAll();
   showToast("Баланс скорректирован");
+}
+
+function showAccountHistory(accountId) {
+  const account = accountById(accountId);
+  if (!account) return;
+  accountActivityAccountId = accountId;
+  accountActivityFilter = "all";
+  renderAccounts();
+  document.querySelector("#accountActivityFilter")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function clearAccountHistoryFilter() {
+  accountActivityAccountId = "";
+  renderAccounts();
 }
 
 function handleAccountAction(action, accountId) {
@@ -3524,10 +3715,12 @@ function handleAccountAction(action, accountId) {
   if (!account) return;
   closeAccountMenus();
   if (action === "open") openAccountDetailsModal(account);
-  if (action === "operation") openOperationModal("expense", null, accountId);
+  if (action === "topup" || action === "income") openOperationModal("income", null, accountId);
+  if (action === "expense" || action === "operation" || action === "purchase") openOperationModal("expense", null, accountId);
+  if (action === "history") showAccountHistory(accountId);
+  if (action === "pay-credit") openTransferModal("", accountId);
   if (action === "transfer") {
-    if (isCreditProduct(account)) openTransferModal("", accountId);
-    else openTransferModal(accountId);
+    openTransferModal(accountId);
   }
   if (action === "edit") {
     if (isCardProduct(account)) openCardModal(account);
@@ -3647,9 +3840,21 @@ document.addEventListener("click", event => {
   }
   if (!event.target.closest(".account-menu-wrap")) closeAccountMenus();
 
+  const accountOpen = event.target.closest("[data-account-open]");
+  if (accountOpen) {
+    openAccountDetailsModal(accountById(accountOpen.dataset.accountOpen));
+    return;
+  }
+
   const accountAction = event.target.closest("[data-account-action]");
   if (accountAction) {
     handleAccountAction(accountAction.dataset.accountAction, accountAction.dataset.accountId);
+    return;
+  }
+
+  const clearAccountHistoryButton = event.target.closest("[data-account-history-clear]");
+  if (clearAccountHistoryButton) {
+    clearAccountHistoryFilter();
     return;
   }
 
@@ -3803,6 +4008,7 @@ document.addEventListener("keydown", event => {
     if (!document.querySelector("#registrationDialog").hidden) closeRegistrationDialog();
     closeDesktopAddMenu();
     closeProfileMenu();
+    closeAccountMenus();
     document.querySelector("#mobileAddMenu").hidden = true;
     document.querySelector("#mobilePaymentsMenu").hidden = true;
     document.querySelector("#mobileMoreMenu").hidden = true;
@@ -3837,7 +4043,13 @@ document.querySelector("#operationForm").addEventListener("submit", event => {
   saveState();
   closeModal();
   renderAll();
-  showToast(operation.type === "income" ? "Доход добавлен" : operation.type === "refund" ? "Возврат добавлен" : "Расход добавлен");
+  showToast(operation.type === "income"
+    ? "Доход добавлен"
+    : operation.type === "refund"
+      ? "Возврат добавлен"
+      : operation.type === "fee"
+        ? "Комиссия добавлена"
+        : "Расход добавлен");
 });
 
 document.querySelector("#recurringKind").addEventListener("change", event => {
@@ -3918,6 +4130,11 @@ document.querySelector("#accountForm").addEventListener("submit", event => {
     isArchived: existing?.isArchived === true,
     color: document.querySelector("#accountColor").value,
     icon: document.querySelector("#accountIconValue").value,
+    goalName: document.querySelector("#accountGoalName")?.value.trim() || "",
+    goalAmount: Number(document.querySelector("#accountGoalAmount")?.value || 0),
+    interestRate: Number(document.querySelector("#accountInterestRate")?.value || 0),
+    nextInterestDate: document.querySelector("#accountNextInterestDate")?.value || "",
+    monthlyInterestIncome: Number(document.querySelector("#accountMonthlyInterestIncome")?.value || 0),
     createdAt: existing?.createdAt || isoToday(),
     updatedAt: isoToday()
   });
@@ -3967,6 +4184,10 @@ document.querySelector("#cardForm").addEventListener("submit", event => {
     isVirtual: document.querySelector("#cardVirtual").value === "virtual",
     expirationDate: document.querySelector("#cardExpiration").value.trim(),
     creditLimit: Number(document.querySelector("#cardCreditLimit").value || 0),
+    minimumPayment: Number(document.querySelector("#cardMinimumPayment")?.value || 0),
+    paymentDueDate: document.querySelector("#cardPaymentDueDate")?.value || "",
+    interestRate: Number(document.querySelector("#cardInterestRate")?.value || 0),
+    gracePaymentAmount: Number(document.querySelector("#cardGracePaymentAmount")?.value || 0),
     isArchived: existing?.isArchived === true,
     color: document.querySelector("#cardColor").value,
     icon: existing?.icon || "",
@@ -3987,6 +4208,16 @@ document.querySelector("#cardForm").addEventListener("submit", event => {
   closeModal();
   renderAll();
   showToast(existing ? "Карта обновлена" : "Карта добавлена");
+});
+
+document.querySelector("#reconcileForm").addEventListener("submit", event => {
+  event.preventDefault();
+  const entered = Number(String(document.querySelector("#reconcileActualBalance").value || "").replace(",", "."));
+  if (!Number.isFinite(entered)) {
+    showToast("Введите корректную сумму");
+    return;
+  }
+  saveReconcileAccount(document.querySelector("#reconcileAccountId").value, entered);
 });
 
 ["transferFrom", "transferTo", "transferAmount", "transferFee"].forEach(id => {
